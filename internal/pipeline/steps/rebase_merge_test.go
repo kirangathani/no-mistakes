@@ -365,3 +365,41 @@ func TestRebaseStep_MergeStrategyAbortedMergeFails(t *testing.T) {
 		t.Fatalf("head = %s, want the reviewed head %s", head, f.headSHA)
 	}
 }
+
+// Ending the conflict by rebasing onto the target instead satisfies ancestry -
+// the target is in HEAD - while producing exactly the linear history merge mode
+// exists to avoid: the reviewed head is gone from the branch, so CI repair
+// continuity falls back to a guess and publication rewrites the open PR's head.
+// The step must fail rather than log a merge that never happened.
+func TestRebaseStep_MergeStrategyRebasedInsteadOfMergedFails(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, true)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			fixtureGit(t, f.dir, "merge", "--abort")
+			fixtureGit(t, f.dir, "rebase", "--strategy-option=theirs", "origin/main")
+			return &agent.Result{Output: json.RawMessage(`{"summary":"rebased"}`)}, nil
+		},
+	}
+
+	sctx := f.context(t, ag, config.RebaseStrategyMerge)
+	sctx.Fixing = true
+
+	_, err := (&RebaseStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected an error when the agent rebased instead of merging, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not merge") {
+		t.Fatalf("error = %v, want it to name the missing merge", err)
+	}
+
+	head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+	if got := parents(t, f.dir, head); len(got) != 1 {
+		t.Fatalf("fixture no longer produces a rebase-shaped head: parents %v", got)
+	}
+	if !isAncestor(context.Background(), f.dir, f.mainSHA, head) {
+		t.Fatal("fixture no longer satisfies plain ancestry; the test proves nothing")
+	}
+}
