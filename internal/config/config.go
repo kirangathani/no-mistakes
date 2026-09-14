@@ -97,6 +97,21 @@ const (
 	// show that - every merge-conflict repair, since a rebase rewrites the
 	// head - revalidates from Review instead. See CI.RevalidateRepairs.
 	DefaultCIRevalidateRepairs = false
+	// RebaseStrategyRebase replays the branch on top of the moved base. It is
+	// the historical behavior and the default.
+	RebaseStrategyRebase = "rebase"
+	// RebaseStrategyMerge integrates the moved base with a merge commit whose
+	// first parent is the branch head the pipeline reviewed.
+	RebaseStrategyMerge = "merge"
+	// DefaultRebaseStrategy is how the rebase step integrates a base branch
+	// that moved under the gated branch when rebase.strategy is unset.
+	//
+	// It is "rebase" because that is what every existing installation already
+	// does: the merge shape changes the commits a run publishes, so it is an
+	// explicit opt-in rather than something a version bump turns on under a
+	// repository that never asked for it. See Rebase.Strategy for what the
+	// merge shape buys.
+	DefaultRebaseStrategy = RebaseStrategyRebase
 	// DefaultEvalMaxCases caps the auto-captured local eval corpus. Cases
 	// share one object pool per repository, so the marginal cost of a case is
 	// its JSON records plus the objects its commits actually introduced, not a
@@ -176,7 +191,10 @@ type GlobalConfig struct {
 	// budget can be set for a repository whose default branch this machine's
 	// user does not control (the common case when contributing to someone
 	// else's project), and a trusted repo value still wins over it.
-	CI     CIRaw
+	CI CIRaw
+	// Rebase is the operator's own rebase-step default. A trusted repo
+	// value still wins over it.
+	Rebase RebaseRaw
 	Commit CommitRaw
 	Intent IntentRaw
 	Test   TestRaw
@@ -213,6 +231,7 @@ type globalConfigRaw struct {
 	SessionReuse            *bool                      `yaml:"session_reuse"`
 	AutoFix                 AutoFixRaw                 `yaml:"auto_fix"`
 	CI                      CIRaw                      `yaml:"ci"`
+	Rebase                  RebaseRaw                  `yaml:"rebase"`
 	Commit                  CommitRaw                  `yaml:"commit"`
 	Intent                  IntentRaw                  `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
@@ -259,10 +278,14 @@ type RepoConfig struct {
 	// PublishIntent trusted-only.
 	AutoFix AutoFixRaw `yaml:"auto_fix"`
 	CI      CIRaw      `yaml:"ci"`
-	Commit  CommitRaw  `yaml:"commit"`
-	Intent  IntentRaw  `yaml:"intent"`
-	Test    TestRaw    `yaml:"test"`
-	PR      PRRaw      `yaml:"pr"`
+	// Rebase is gate-control: EffectiveRepoConfig keeps it trusted-only so a
+	// pushed branch cannot opt its own integration out of the shape the
+	// maintainer chose.
+	Rebase RebaseRaw `yaml:"rebase"`
+	Commit CommitRaw `yaml:"commit"`
+	Intent IntentRaw `yaml:"intent"`
+	Test   TestRaw   `yaml:"test"`
+	PR     PRRaw     `yaml:"pr"`
 	// Providers carries provider-specific settings. Repo values overlay the
 	// global ones field by field. Every field is opt-in and defaults false, and
 	// none of them gates or weakens a pipeline step, so unlike the trusted-only
@@ -467,6 +490,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		AllowRepoCommands      bool         `yaml:"allow_repo_commands"`
 		AutoFix                AutoFixRaw   `yaml:"auto_fix"`
 		CI                     CIRaw        `yaml:"ci"`
+		Rebase                 RebaseRaw    `yaml:"rebase"`
 		Commit                 CommitRaw    `yaml:"commit"`
 		Intent                 IntentRaw    `yaml:"intent"`
 		Test                   TestRaw      `yaml:"test"`
@@ -490,6 +514,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.AllowRepoCommands = raw.AllowRepoCommands
 	c.AutoFix = raw.AutoFix
 	c.CI = raw.CI
+	c.Rebase = raw.Rebase
 	c.Commit = raw.Commit
 	c.Intent = raw.Intent
 	c.Test = raw.Test
@@ -570,6 +595,41 @@ type CI struct {
 	RevalidateRepairs bool
 }
 
+// RebaseRaw is the YAML representation of rebase-step settings.
+type RebaseRaw struct {
+	// Strategy is a pointer so an explicit "rebase" in a repository's config
+	// can override a global "merge", which a plain string could not express
+	// (it would be indistinguishable from "not set").
+	Strategy *string `yaml:"strategy"`
+}
+
+// Rebase holds the resolved rebase-step settings.
+type Rebase struct {
+	// Strategy selects how the rebase step integrates a base branch that moved
+	// under the gated branch.
+	//
+	// "rebase" (default): replay the branch's commits on top of the new base.
+	// Every branch commit is rewritten, so the reviewed head no longer exists
+	// on the branch, publication needs a force push that rewrites an open PR's
+	// head, and the resolution of any conflict leaves no evidence behind - the
+	// result is just commits, with nothing to compare the two sides against.
+	//
+	// "merge": integrate the base with a `git merge --no-ff` commit whose FIRST
+	// parent is the head the pipeline reviewed. Three things follow. The
+	// reviewed head stays an ancestor, so the CI step's continuity rule
+	// (see CI.RevalidateRepairs) is satisfied by ancestry rather than by a
+	// content guess. Publication is a fast-forward, so an open PR's head is
+	// appended to rather than rewritten and a review attestation bound to an
+	// exact SHA survives. And the merge commit keeps both parents, so whether a
+	// conflict resolution deleted content one side introduced stays decidable
+	// afterwards, by anything, from outside the pipeline. The conflict
+	// resolver is told to resolve additively to match.
+	//
+	// The cost is a merge commit per integration. On a squash-merged default
+	// branch they never reach it; on a merge-committed one they do.
+	Strategy string
+}
+
 // AutoFix holds resolved per-step auto-fix attempt limits.
 // A value of 0 means auto-fix is disabled (requires manual approval).
 type AutoFix struct {
@@ -615,6 +675,7 @@ type Config struct {
 	ProtectedPaths []string
 	AutoFix        AutoFix
 	CI             CI
+	Rebase         Rebase
 	Commit         Commit
 	Intent         Intent
 	Test           Test
@@ -2000,6 +2061,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateEvalRaw(raw.Eval); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateRebaseRaw(raw.Rebase); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -2127,6 +2191,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	}
 	cfg.AutoFix = raw.AutoFix
 	cfg.CI = raw.CI
+	cfg.Rebase = raw.Rebase
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
@@ -2269,6 +2334,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
 	if err := validateGates(cfg.Gates); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
+	if err := validateRebaseRaw(cfg.Rebase); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
 	cfg.PR.BaseBranch = strings.TrimSpace(cfg.PR.BaseBranch)
@@ -2445,6 +2513,14 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// before it is published, so a pushed branch must not be able to turn
 		// the maintainer's revalidation requirement off for its own repairs.
 		effective.CI = trusted.CI
+		// rebase.strategy is gate-control in the same sense no_ci is. It decides
+		// whether integrating a moved base leaves an auditable merge commit
+		// behind - two parents a resolution can be checked against afterwards -
+		// or rewrites the branch and leaves nothing. A pushed branch must not be
+		// able to opt its own integration out of the shape the maintainer chose,
+		// in either direction, so it is trusted-only regardless of
+		// allow_repo_commands.
+		effective.Rebase = trusted.Rebase
 		// test.evidence.branch names the git ref evidence commits are pushed
 		// to with the maintainer's credentials. It is trusted-only so a pushed
 		// branch cannot aim them at another branch of the repository; the rest
@@ -2484,6 +2560,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.DisableProjectSettings = false
 		effective.NoCI = false
 		effective.CI = CIRaw{}
+		effective.Rebase = RebaseRaw{}
 		effective.Test.Evidence.Branch = nil
 		effective.Test.Instructions = ""
 		effective.Test.AllowApproveOverFailure = ""
@@ -2760,6 +2837,38 @@ func ciDefaults() CI {
 	}
 }
 
+// rebaseDefaults returns the default rebase-step settings.
+func rebaseDefaults() Rebase {
+	return Rebase{Strategy: DefaultRebaseStrategy}
+}
+
+// applyRebaseOverrides applies a non-nil raw strategy onto resolved defaults.
+// The value was already validated at parse time, so an unrecognized one cannot
+// reach here; an empty string is treated as "not set" so a repository can
+// comment the key out without inventing a third meaning.
+func applyRebaseOverrides(dst *Rebase, src *RebaseRaw) {
+	if src.Strategy == nil {
+		return
+	}
+	if v := strings.TrimSpace(*src.Strategy); v != "" {
+		dst.Strategy = v
+	}
+}
+
+// validateRebaseRaw fails the config closed on an unrecognized rebase.strategy.
+// Silently falling back to the default would let a typo ("merges") quietly keep
+// rewriting history a maintainer asked to stop rewriting.
+func validateRebaseRaw(r RebaseRaw) error {
+	if r.Strategy == nil {
+		return nil
+	}
+	switch strings.TrimSpace(*r.Strategy) {
+	case "", RebaseStrategyRebase, RebaseStrategyMerge:
+		return nil
+	}
+	return fmt.Errorf("rebase.strategy: %q is not a valid strategy (want %q or %q)", *r.Strategy, RebaseStrategyRebase, RebaseStrategyMerge)
+}
+
 // applyCIOverrides applies non-nil raw values onto resolved defaults, clamping
 // the rerun budget into range: a negative value disables reruns rather than
 // inverting the bound, and anything above MaxCIRerunTransient is capped so a
@@ -2836,6 +2945,13 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyCIOverrides(&ci, &global.CI)
 	applyCIOverrides(&ci, &repo.CI)
 
+	// The repo value is trusted-only (EffectiveRepoConfig sourced it from the
+	// default branch), so a maintainer's chosen integration shape survives a
+	// pushed branch and still overrides the operator's machine-wide default.
+	rebase := rebaseDefaults()
+	applyRebaseOverrides(&rebase, &global.Rebase)
+	applyRebaseOverrides(&rebase, &repo.Rebase)
+
 	intent := intentDefaults()
 	applyIntentOverrides(&intent, &global.Intent)
 	applyIntentOverrides(&intent, &repo.Intent)
@@ -2909,6 +3025,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		ProtectedPaths: repo.ProtectedPaths,
 		AutoFix:        af,
 		CI:             ci,
+		Rebase:         rebase,
 		Commit:         commit,
 		Intent:         intent,
 		Test:           test,

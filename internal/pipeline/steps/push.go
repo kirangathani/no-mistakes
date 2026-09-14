@@ -174,6 +174,13 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		if err := stepGitPushCommit(sctx, pushURL, headBeingPushed, ref, "", false); err != nil {
 			return fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
+	case decision.fastForward:
+		// Append-only update: plain push, no force. This is what keeps an open
+		// PR's head from being rewritten when the branch integrated a moved
+		// base by merging rather than rebasing (rebase.strategy).
+		if err := stepGitPushCommit(sctx, pushURL, headBeingPushed, ref, "", false); err != nil {
+			return fmt.Errorf("push to %s: %w", pushTarget, err)
+		}
 	case decision.upToDate:
 		// Remote already at this exact head. This freshly verified equality is a
 		// successful binding even though no objects needed to move.
