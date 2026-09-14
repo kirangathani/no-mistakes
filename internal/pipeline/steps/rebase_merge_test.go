@@ -332,3 +332,36 @@ func fixtureGit(t *testing.T, dir string, args ...string) {
 		t.Fatal(fmt.Errorf("git %v: %s: %w", args, out, err))
 	}
 }
+
+// An agent can also end the conflict by abandoning it: `git merge --abort`
+// clears MERGE_HEAD and restores the reviewed head, so the unconcluded-merge
+// guard above sees a clean worktree and passes. Nothing was integrated, so the
+// step must still fail rather than carry the un-integrated head forward as if
+// the base had been merged in.
+func TestRebaseStep_MergeStrategyAbortedMergeFails(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, true)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			fixtureGit(t, f.dir, "merge", "--abort")
+			return &agent.Result{Output: json.RawMessage(`{"summary":"gave up"}`)}, nil
+		},
+	}
+
+	sctx := f.context(t, ag, config.RebaseStrategyMerge)
+	sctx.Fixing = true
+
+	if _, err := (&RebaseStep{}).Execute(sctx); err == nil {
+		t.Fatal("expected an error when the agent aborted the merge, got nil")
+	} else if !strings.Contains(err.Error(), "did not merge") {
+		t.Fatalf("error = %v, want it to name the un-integrated target", err)
+	}
+	if mergeInProgress(context.Background(), f.dir) {
+		t.Fatal("merge left in progress after the abort")
+	}
+	if head := gitCmd(t, f.dir, "rev-parse", "HEAD"); head != f.headSHA {
+		t.Fatalf("head = %s, want the reviewed head %s", head, f.headSHA)
+	}
+}

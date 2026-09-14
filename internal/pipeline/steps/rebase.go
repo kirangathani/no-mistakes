@@ -616,6 +616,17 @@ Instructions:
 		return fmt.Errorf("agent did not complete the merge")
 	}
 
+	// Concluded is not the same as merged. An agent can end the conflict by
+	// running `git merge --abort`, which clears MERGE_HEAD and returns HEAD to
+	// the reviewed commit, so the guard above sees a clean worktree and passes.
+	// The run would then carry on with the target un-integrated, silently
+	// losing the two-parent history merge mode exists to produce. Ancestry is
+	// the proof: a merge that landed makes targetRef a parent, and therefore an
+	// ancestor, of HEAD.
+	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", targetRef, "HEAD"); err != nil {
+		return fmt.Errorf("agent did not merge %s into the branch", targetRef)
+	}
+
 	return nil
 }
 
