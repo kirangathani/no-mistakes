@@ -629,13 +629,17 @@ Instructions:
 		return fmt.Errorf("agent did not complete the merge")
 	}
 
-	// Concluded is not the same as merged, and integrated is not the same as
-	// merged either. An agent can end the conflict with `git merge --abort`,
-	// which clears MERGE_HEAD and restores the reviewed head, or by rebasing
-	// onto the target instead - and ancestry alone accepts both. The shape the
-	// strategy exists to produce is what has to be proven: a new commit whose
-	// FIRST parent is still the head the pipeline reviewed and which carries
-	// the target. Only a merge satisfies both.
+	// Concluded is not the same as merged. Requiring HEAD to have moved and to
+	// carry BOTH snapshots proves a merge happened, because shouldSkipRebase
+	// has already returned early unless preMergeHead and targetSHA are
+	// divergent: two divergent commits can only both be ancestors of HEAD if
+	// some commit in its history has two parents joining those lines. It also
+	// proves the reviewed head itself was not rewritten, which target ancestry
+	// alone never did and which the CI continuity rule and the attestation's
+	// head binding both depend on. Every way of ending the conflict without
+	// merging fails it: `git merge --abort` leaves HEAD where it was, and a
+	// rebase or a `git reset --hard` onto the target drops the reviewed head
+	// out of the history.
 	head, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return fmt.Errorf("get merged head: %w", err)
@@ -643,11 +647,10 @@ Instructions:
 	if head == preMergeHead {
 		return fmt.Errorf("agent did not merge %s into the branch: the branch is still at %s", targetRef, preMergeHead)
 	}
-	firstParent, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "HEAD^1")
-	if err != nil || firstParent != preMergeHead {
-		return fmt.Errorf("agent did not merge %s into the branch: the reviewed head %s is not the first parent of %s", targetRef, preMergeHead, head)
+	if !isAncestor(ctx, sctx.WorkDir, preMergeHead, head) {
+		return fmt.Errorf("agent did not merge %s into the branch: the reviewed head %s is not in %s", targetRef, preMergeHead, head)
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", targetSHA, "HEAD"); err != nil {
+	if !isAncestor(ctx, sctx.WorkDir, targetSHA, head) {
 		return fmt.Errorf("agent did not merge %s into the branch: %s is not in %s", targetRef, targetSHA, head)
 	}
 

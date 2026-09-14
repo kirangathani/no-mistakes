@@ -403,3 +403,40 @@ func TestRebaseStep_MergeStrategyRebasedInsteadOfMergedFails(t *testing.T) {
 		t.Fatal("fixture no longer satisfies plain ancestry; the test proves nothing")
 	}
 }
+
+// Nothing forbids the agent from committing again after concluding the merge -
+// a textual resolution routinely leaves a semantic one behind. The merge shape
+// is intact at that head, so the step must accept it.
+func TestRebaseStep_MergeStrategyFollowUpCommitAfterTheMergeIsAccepted(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, true)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			writeFixtureFile(t, f.dir, "shared.txt", "main line\nfeature line\n")
+			fixtureGit(t, f.dir, "add", "shared.txt")
+			fixtureGit(t, f.dir, "commit", "--no-edit")
+			writeFixtureFile(t, f.dir, "shared.txt", "main line\nfeature line\nreconciled\n")
+			fixtureGit(t, f.dir, "add", "shared.txt")
+			fixtureGit(t, f.dir, "commit", "-m", "fix up the merged tree")
+			return &agent.Result{Output: json.RawMessage(`{"summary":"resolved"}`)}, nil
+		},
+	}
+
+	sctx := f.context(t, ag, config.RebaseStrategyMerge)
+	sctx.Fixing = true
+
+	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
+		t.Fatalf("merge with a follow-up commit was rejected: %v", err)
+	}
+
+	head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+	mergeCommit := gitCmd(t, f.dir, "rev-parse", "HEAD~1")
+	if got := parents(t, f.dir, mergeCommit); len(got) != 2 || got[0] != f.headSHA || got[1] != f.mainSHA {
+		t.Fatalf("merge commit %s parents = %v, want [%s %s]", mergeCommit, got, f.headSHA, f.mainSHA)
+	}
+	if !isAncestor(context.Background(), f.dir, f.headSHA, head) {
+		t.Fatalf("reviewed head %s is not in %s", f.headSHA, head)
+	}
+}
