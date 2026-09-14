@@ -715,6 +715,8 @@ The two differ in what survives the integration, which matters in three places:
 | Evidence of what a conflict resolution did | none; the result is just commits | the merge commit's two parents and their merge base |
 | Cost | none | one merge commit per integration |
 
+Integration publishes as a fast-forward under `merge`. A CI merge-conflict repair is the exception: it rebases onto the base branch whichever strategy is set, so that repair still force-pushes and still revalidates in full.
+
 **Continuity.** The CI step publishes a repair without a full revalidation cycle only when it can prove the repaired head continues the reviewed head (see [`ci.revalidate_repairs`](#cirevalidate_repairs)). Under `merge` that proof is plain ancestry, because the reviewed head is a parent. Under `rebase` there is nothing to prove it with.
 
 **Attestation.** A review attestation that binds to an exact commit SHA survives a merge, because the attested commit stays in the branch's history. A rebase rewrites every branch SHA, so the attested commit no longer exists on the branch.

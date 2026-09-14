@@ -597,10 +597,7 @@ type CI struct {
 
 // RebaseRaw is the YAML representation of rebase-step settings.
 type RebaseRaw struct {
-	// Strategy is a pointer so an explicit "rebase" in a repository's config
-	// can override a global "merge", which a plain string could not express
-	// (it would be indistinguishable from "not set").
-	Strategy *string `yaml:"strategy"`
+	Strategy string `yaml:"strategy"`
 }
 
 // Rebase holds the resolved rebase-step settings.
@@ -2842,15 +2839,12 @@ func rebaseDefaults() Rebase {
 	return Rebase{Strategy: DefaultRebaseStrategy}
 }
 
-// applyRebaseOverrides applies a non-nil raw strategy onto resolved defaults.
+// applyRebaseOverrides applies a raw strategy onto resolved defaults.
 // The value was already validated at parse time, so an unrecognized one cannot
 // reach here; an empty string is treated as "not set" so a repository can
 // comment the key out without inventing a third meaning.
 func applyRebaseOverrides(dst *Rebase, src *RebaseRaw) {
-	if src.Strategy == nil {
-		return
-	}
-	if v := strings.TrimSpace(*src.Strategy); v != "" {
+	if v := strings.TrimSpace(src.Strategy); v != "" {
 		dst.Strategy = v
 	}
 }
@@ -2859,14 +2853,11 @@ func applyRebaseOverrides(dst *Rebase, src *RebaseRaw) {
 // Silently falling back to the default would let a typo ("merges") quietly keep
 // rewriting history a maintainer asked to stop rewriting.
 func validateRebaseRaw(r RebaseRaw) error {
-	if r.Strategy == nil {
-		return nil
-	}
-	switch strings.TrimSpace(*r.Strategy) {
+	switch strings.TrimSpace(r.Strategy) {
 	case "", RebaseStrategyRebase, RebaseStrategyMerge:
 		return nil
 	}
-	return fmt.Errorf("rebase.strategy: %q is not a valid strategy (want %q or %q)", *r.Strategy, RebaseStrategyRebase, RebaseStrategyMerge)
+	return fmt.Errorf("rebase.strategy: %q is not a valid strategy (want %q or %q)", r.Strategy, RebaseStrategyRebase, RebaseStrategyMerge)
 }
 
 // applyCIOverrides applies non-nil raw values onto resolved defaults, clamping
