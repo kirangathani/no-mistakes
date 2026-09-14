@@ -81,6 +81,9 @@ ci:
   rerun_transient: 0
   revalidate_repairs: false
 
+rebase:
+  strategy: rebase # or: merge
+
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
   # branch_pattern: '([A-Z]+-[0-9]+)'

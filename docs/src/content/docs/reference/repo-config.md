@@ -656,7 +656,7 @@ Continuity is proven when the repaired head is the run's durably review-approved
 
 `revalidate_repairs` sets the intent, identically on every path:
 
-- **`false` (default)** asks to publish when it is safe to. A repair that builds on the reviewed head - the ordinary case, where the fix agent adds a commit - is committed and published immediately through the same guarded path the [Push step](/no-mistakes/reference/pipeline-steps/#push) uses (review-approved-head continuity, the force-with-lease anchor, remote verification, and the durable push binding all still apply), and the CI monitor keeps watching the same run for the new head. One repair costs one agent round.
+- **`false` (default)** asks to publish when it is safe to. A repair that builds on the reviewed head - the ordinary case, where the fix agent adds a commit - is committed and published immediately through the same guarded path the [Push step](/no-mistakes/reference/pipeline-steps/#push) uses (review-approved-head continuity, that step's own remote-safety decision, remote verification, and the durable push binding all still apply), and the CI monitor keeps watching the same run for the new head. One repair costs one agent round.
 - **`true`** asks for revalidation outright: every repair is kept local, the run's review approval is revoked, and validation restarts at Review so the repaired head re-passes Review, Test, Document, and Lint before Push republishes it.
 
 CI repair publication uses the same settlement order as Push. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the publication and retry behavior.

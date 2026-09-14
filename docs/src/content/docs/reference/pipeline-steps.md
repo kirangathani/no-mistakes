@@ -225,7 +225,7 @@ Pushes the validated branch to the configured push target.
 - Uses `--force-with-lease=<ref>:<sha>` with an explicit SHA anchor for allowed existing-branch rewrites
 - Pushes the exact verified commit SHA instead of mutable worktree `HEAD`
 - Treats the branch as already pushed when the remote already points at that verified commit
-- Uses regular push for new branches
+- Uses regular push for new branches, and for an append-only update to an existing branch - one whose remote head is already an ancestor of the head being pushed, so nothing can be discarded and the remote itself, rather than a lease anchor, enforces the no-rewrite property an open PR's head depends on. This holds under either [`rebase.strategy`](/no-mistakes/reference/repo-config/#rebasestrategy), since it is a property of the update rather than of how the update was produced
 - When the local gate mirror exists, applies the [private mirror reconciliation contract](/no-mistakes/concepts/gate-model/#private-mirror-reconciliation), including Decision 41-A for the exact submitted head, while preserving newer descendants through shared worktree refs; skips a missing mirror
 - Only after the remote and gate mirror settle, atomically records the exact delivered commit as both the run head and successful-push binding; until that database write succeeds, the durable database head and binding remain unchanged, so a partial failure records nothing and is safe to re-enter
 
