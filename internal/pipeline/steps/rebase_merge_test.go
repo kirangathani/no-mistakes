@@ -190,6 +190,40 @@ func TestRebaseStep_MergeStrategyResolvesConflictAdditively(t *testing.T) {
 	}
 }
 
+// An agent that resolves the files but never concludes the merge leaves
+// MERGE_HEAD set and the index conflicted. Carrying that forward would publish
+// the reviewed head as if the integration had happened, so the step aborts the
+// merge and fails instead.
+func TestRebaseStep_MergeStrategyUnconcludedMergeIsAbortedAndFails(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, true)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			writeFixtureFile(t, f.dir, "shared.txt", "main line\nfeature line\n")
+			fixtureGit(t, f.dir, "add", "shared.txt")
+			// Deliberately no commit: the merge is left in progress.
+			return &agent.Result{Output: json.RawMessage(`{"summary":"resolved"}`)}, nil
+		},
+	}
+
+	sctx := f.context(t, ag, config.RebaseStrategyMerge)
+	sctx.Fixing = true
+
+	if _, err := (&RebaseStep{}).Execute(sctx); err == nil {
+		t.Fatal("expected an error for an unconcluded merge, got nil")
+	} else if !strings.Contains(err.Error(), "did not complete the merge") {
+		t.Fatalf("error = %v, want it to name the unconcluded merge", err)
+	}
+	if mergeInProgress(context.Background(), f.dir) {
+		t.Fatal("merge left in progress; it should have been aborted")
+	}
+	if head := gitCmd(t, f.dir, "rev-parse", "HEAD"); head != f.headSHA {
+		t.Fatalf("head = %s, want the reviewed head %s after the abort", head, f.headSHA)
+	}
+}
+
 // The reviewed head staying an ancestor is the point of the merge shape: the CI
 // step's continuity rule then holds by ancestry, with no patch-id or
 // content-based guess, so a later repair can be published rather than paying a
