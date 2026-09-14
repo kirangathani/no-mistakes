@@ -1,0 +1,300 @@
+package steps
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+)
+
+// mergeFixture builds a repository whose feature branch and origin/main have
+// both moved since they diverged, which is the only situation the rebase step
+// actually integrates anything in. sharedContent decides whether they collide:
+// give main and feature different content for the same file to force a
+// conflict, or touch separate files for a clean integration.
+type mergeFixture struct {
+	dir      string
+	upstream string
+	baseSHA  string
+	headSHA  string // the feature head the pipeline reviewed, pre-integration
+	mainSHA  string // origin/main after it moved
+}
+
+func newMergeFixture(t *testing.T, conflicting bool) mergeFixture {
+	t.Helper()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	writeFixtureFile(t, dir, "shared.txt", "base\n")
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "base commit")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if conflicting {
+		writeFixtureFile(t, dir, "shared.txt", "feature line\n")
+	} else {
+		writeFixtureFile(t, dir, "feature.txt", "feature line\n")
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature change")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	gitCmd(t, dir, "checkout", "main")
+	if conflicting {
+		writeFixtureFile(t, dir, "shared.txt", "main line\n")
+	} else {
+		writeFixtureFile(t, dir, "main.txt", "main line\n")
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "main advance")
+	mainSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "feature")
+
+	return mergeFixture{dir: dir, upstream: upstream, baseSHA: baseSHA, headSHA: headSHA, mainSHA: mainSHA}
+}
+
+func writeFixtureFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f mergeFixture) context(t *testing.T, ag agent.Agent, strategy string) *pipeline.StepContext {
+	t.Helper()
+	sctx := newTestContextWithDBRecords(t, ag, f.dir, f.baseSHA, f.headSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = f.upstream
+	if strategy != "" {
+		sctx.Config.Rebase.Strategy = strategy
+	}
+	return sctx
+}
+
+// parents returns a commit's parent SHAs in order. The FIRST one is what the
+// whole merge strategy turns on: it must stay the head the pipeline reviewed.
+func parents(t *testing.T, dir, rev string) []string {
+	t.Helper()
+	out := gitCmd(t, dir, "rev-list", "--parents", "-n", "1", rev)
+	fields := strings.Fields(out)
+	if len(fields) < 1 {
+		t.Fatalf("rev-list --parents returned %q", out)
+	}
+	return fields[1:]
+}
+
+func TestRebaseStep_MergeStrategyIntegratesMovedBaseAsAMergeCommit(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, false)
+	sctx := f.context(t, &mockAgent{name: "test"}, config.RebaseStrategyMerge)
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("expected a clean merge, got approval gate: %s", outcome.Findings)
+	}
+
+	head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+	got := parents(t, f.dir, head)
+	if len(got) != 2 {
+		t.Fatalf("head %s has %d parent(s) %v, want a merge commit with 2", head, len(got), got)
+	}
+	if got[0] != f.headSHA {
+		t.Fatalf("first parent = %s, want the reviewed head %s", got[0], f.headSHA)
+	}
+	if got[1] != f.mainSHA {
+		t.Fatalf("second parent = %s, want origin/main %s", got[1], f.mainSHA)
+	}
+	// Both sides' work is present in the tree.
+	for _, name := range []string{"feature.txt", "main.txt"} {
+		if _, err := os.Stat(filepath.Join(f.dir, name)); err != nil {
+			t.Fatalf("expected %s after the merge: %v", name, err)
+		}
+	}
+	if status := gitStatusPorcelain(t, f.dir); status != "" {
+		t.Fatalf("expected a clean worktree, got: %s", status)
+	}
+	if sctx.Run.HeadSHA != head {
+		t.Fatalf("run head = %s, want the merge commit %s", sctx.Run.HeadSHA, head)
+	}
+}
+
+func TestRebaseStep_MergeStrategyResolvesConflictAdditively(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, true)
+
+	var prompt string
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			prompt = opts.Prompt
+			// An additive resolution: keep what BOTH sides introduced.
+			writeFixtureFile(t, f.dir, "shared.txt", "main line\nfeature line\n")
+			fixtureGit(t, f.dir, "add", "shared.txt")
+			fixtureGit(t, f.dir, "commit", "--no-edit")
+			return &agent.Result{Output: json.RawMessage(`{"summary":"kept both sides"}`)}, nil
+		},
+	}
+
+	sctx := f.context(t, ag, config.RebaseStrategyMerge)
+	sctx.Fixing = true
+
+	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected 1 agent call, got %d", len(ag.calls))
+	}
+	for _, want := range []string{
+		"Resolve ADDITIVELY",
+		"never delete content one side introduced",
+		"git commit --no-edit",
+		"shared.txt",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("resolver prompt is missing %q, got:\n%s", want, prompt)
+		}
+	}
+
+	head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+	got := parents(t, f.dir, head)
+	if len(got) != 2 || got[0] != f.headSHA || got[1] != f.mainSHA {
+		t.Fatalf("resolved head %s parents = %v, want [%s %s]", head, got, f.headSHA, f.mainSHA)
+	}
+	resolved := gitCmd(t, f.dir, "show", "HEAD:shared.txt")
+	if !strings.Contains(resolved, "feature line") || !strings.Contains(resolved, "main line") {
+		t.Fatalf("resolution dropped a side: %q", resolved)
+	}
+	if mergeInProgress(context.Background(), f.dir) {
+		t.Fatal("merge left in progress after the resolution")
+	}
+}
+
+// The reviewed head staying an ancestor is the point of the merge shape: the CI
+// step's continuity rule then holds by ancestry, with no patch-id or
+// content-based guess, so a later repair can be published rather than paying a
+// full revalidation cycle.
+func TestRebaseStep_MergeStrategyKeepsReviewedHeadAncestorForCIRepairContinuity(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, false)
+	sctx := f.context(t, &mockAgent{name: "test"}, config.RebaseStrategyMerge)
+
+	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+
+	// Review approved the pre-integration head.
+	recordReviewApproval(t, sctx, f.headSHA)
+	if gap := ciRepairContinuityGap(sctx, head); gap != "" {
+		t.Fatalf("merged head does not continue the reviewed head: %s", gap)
+	}
+
+	// The same fixture rebased instead leaves a head the rule cannot accept.
+	fr := newMergeFixture(t, false)
+	rsctx := fr.context(t, &mockAgent{name: "test"}, config.RebaseStrategyRebase)
+	if _, err := (&RebaseStep{}).Execute(rsctx); err != nil {
+		t.Fatal(err)
+	}
+	recordReviewApproval(t, rsctx, fr.headSHA)
+	rebased := gitCmd(t, fr.dir, "rev-parse", "HEAD")
+	if gap := ciRepairContinuityGap(rsctx, rebased); gap == "" {
+		t.Fatal("expected a rebased head to fail the continuity rule; the merge test proves nothing otherwise")
+	}
+}
+
+// Publication after a merge must append, never rewrite: an open PR's head and a
+// review attestation bound to an exact SHA both depend on it.
+func TestRebaseStep_MergeStrategyPublishesAsAFastForwardWithoutForce(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, false)
+	// The reviewed head is already published, as it is by the time anything
+	// integrates a moved base mid-run.
+	gitCmd(t, f.dir, "push", "origin", "feature")
+
+	sctx := f.context(t, &mockAgent{name: "test"}, config.RebaseStrategyMerge)
+	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+
+	ctx := context.Background()
+	gitRun := func(args ...string) (string, error) { return git.Run(ctx, f.dir, args...) }
+	decision, err := resolveForcePushDecision(gitRun, f.upstream, "refs/heads/feature", head, f.headSHA, f.baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.fastForward {
+		t.Fatalf("expected a fast-forward publication, got %#v", decision)
+	}
+	if decision.remoteSHA != f.headSHA {
+		t.Fatalf("remote head = %s, want the reviewed head %s", decision.remoteSHA, f.headSHA)
+	}
+}
+
+// The flag off must leave the step exactly as it was, so an existing
+// installation sees no change from a version bump. Unset and an explicit
+// "rebase" must also mean the same thing.
+func TestRebaseStep_DefaultStrategyStillRebasesUnchanged(t *testing.T) {
+	t.Parallel()
+	shape := func(strategy string) (tree string, subjects string, parentCount int, reviewedHeadKept bool) {
+		f := newMergeFixture(t, false)
+		sctx := f.context(t, &mockAgent{name: "test"}, strategy)
+		if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+		return gitCmd(t, f.dir, "rev-parse", "HEAD^{tree}"),
+			gitCmd(t, f.dir, "log", "--format=%s", f.baseSHA+"..HEAD"),
+			len(parents(t, f.dir, head)),
+			isAncestor(context.Background(), f.dir, f.headSHA, head)
+	}
+
+	unsetTree, unsetSubjects, unsetParents, unsetKept := shape("")
+	explicitTree, explicitSubjects, explicitParents, explicitKept := shape(config.RebaseStrategyRebase)
+
+	if unsetTree != explicitTree || unsetSubjects != explicitSubjects {
+		t.Fatalf("explicit %q differs from unset: trees %s/%s, subjects %q/%q",
+			config.RebaseStrategyRebase, unsetTree, explicitTree, unsetSubjects, explicitSubjects)
+	}
+	if unsetParents != 1 || explicitParents != 1 {
+		t.Fatalf("rebase produced a merge commit: parents %d/%d", unsetParents, explicitParents)
+	}
+	if unsetKept || explicitKept {
+		t.Fatal("rebase left the pre-rebase head as an ancestor; the fixture no longer rebases anything")
+	}
+}
+
+func fixtureGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		"GIT_EDITOR=true",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatal(fmt.Errorf("git %v: %s: %w", args, out, err))
+	}
+}
