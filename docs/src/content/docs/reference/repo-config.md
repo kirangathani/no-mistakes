@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.path_instructions`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, and `pr.publish_intent` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.path_instructions`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, and `pr.publish_intent` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -78,6 +78,11 @@ auto_fix:
 ci:
   rerun_transient: 0
   revalidate_repairs: false
+
+# How a base branch that moved under your branch is integrated.
+# Read only from the trusted default branch.
+rebase:
+  strategy: rebase # or: merge
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
@@ -680,6 +685,45 @@ A pushed branch cannot turn a maintainer's revalidation requirement off for its 
 
 A value set here always wins over the operator's own [`ci.revalidate_repairs`](/no-mistakes/reference/global-config/#cirevalidate_repairs), in both directions: `true` here enables revalidation even when the global value is `false`, and an explicit `false` here opts out even when the global value is `true`.
 With no trusted copy of this file, the operator's global value applies, then the built-in default of `false`.
+
+### rebase.strategy
+
+How the [Rebase step](/no-mistakes/reference/pipeline-steps/#rebase) integrates a base branch that moved under the gated branch.
+
+| | |
+|---|---|
+| Type | `string` (`rebase` or `merge`) |
+| Default | `rebase` |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+rebase:
+  strategy: merge
+```
+
+**Opting in.** Commit that block to your **default branch** (the same copy the daemon reads `commands` and `agent` from). It takes effect on the next run of every branch in the repository; a branch cannot opt itself in or out. The default stays `rebase` for every repository that does not ask, so upgrading no-mistakes never changes the shape of history under you.
+
+- **`rebase` (default)** replays the branch's commits on top of the new base. This is the historical behavior and is unchanged.
+- **`merge`** integrates the base with a `git merge --no-ff` commit whose **first parent** is the head the pipeline reviewed.
+
+The two differ in what survives the integration, which matters in three places:
+
+| | `rebase` (default) | `merge` |
+|---|---|---|
+| The reviewed head after integration | rewritten; no longer exists on the branch | still on the branch, as the first parent |
+| Publication | force-push; an open PR's head is rewritten | fast-forward; the PR's head is appended to |
+| Evidence of what a conflict resolution did | none; the result is just commits | the merge commit's two parents and their merge base |
+| Cost | none | one merge commit per integration |
+
+**Continuity.** The CI step publishes a repair without a full revalidation cycle only when it can prove the repaired head continues the reviewed head (see [`ci.revalidate_repairs`](#cirevalidate_repairs)). Under `merge` that proof is plain ancestry, because the reviewed head is a parent. Under `rebase` there is nothing to prove it with.
+
+**Attestation.** A review attestation that binds to an exact commit SHA survives a merge, because the attested commit stays in the branch's history. A rebase rewrites every branch SHA, so the attested commit no longer exists on the branch.
+
+**Audit.** Whether a conflict resolution deleted content one side introduced is decidable from a merge commit alone - its two parents and their merge base are all the inputs - by anything, afterwards, from outside no-mistakes. A rebase leaves no such record, so the same question is unanswerable once the run ends. To match, the conflict resolver's prompt under `merge` requires an **additive** resolution: keep both sides' introduced content, and never delete what one side introduced merely to make the merge apply. Only genuinely mutually exclusive changes may supersede one another, and the agent must say which and why.
+
+**The cost is a merge commit per integration.** On a squash-merged default branch (one commit per PR) those commits collapse at landing and never reach it. On a merge-committed one they do, so the history is a graph rather than a line.
+
+This value is read only from the trusted default-branch copy of this file, regardless of [`allow_repo_commands`](#allow_repo_commands). It decides whether integrating a moved base leaves auditable evidence behind, so a pushed branch must not be able to change it in either direction. A value set here wins over the operator's own [`rebase.strategy`](/no-mistakes/reference/global-config/#rebasestrategy).
 
 ### commit.fix_message
 

@@ -57,7 +57,7 @@ It can fail the run only if cleanup fails after the disambiguation agent leaves 
 
 ## Rebase
 
-Fetches the latest authoritative remote state, fetches the configured pushed-branch target, and rebases your branch onto those refs.
+Fetches the latest authoritative remote state, fetches the configured pushed-branch target, and integrates your branch with those refs - by rebasing onto them, or by merging them in when [`rebase.strategy: merge`](/no-mistakes/reference/repo-config/#rebasestrategy) is configured.
 
 The integration branch used below is the [PR base branch](/no-mistakes/reference/repo-config/#prbase_branch): the repository's forge default branch, or the trusted [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) when configured.
 
@@ -75,9 +75,10 @@ The integration branch used below is the [PR base branch](/no-mistakes/reference
 - If a fast-forward is possible, does a hard-reset instead of a rebase
 - If the diff against the PR base branch is empty after rebase, completes rebase and skips all remaining pipeline steps
 - On conflict: records conflicting files, aborts the rebase, and reports findings
+- Under [`rebase.strategy: merge`](/no-mistakes/reference/repo-config/#rebasestrategy), every step above is unchanged except the integration itself: each target is merged with `git merge --no-ff` rather than rebased onto, so the head the pipeline reviewed stays on the branch as the merge commit's first parent, publication is a fast-forward rather than a force-push, and the merge commit's two parents keep the conflict resolution auditable afterwards. The skip, fast-forward, force-push and bundled-local-commit rules are the same in both strategies
 - Bounds the conflict-repair agent with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout): an expired budget cancels the agent and fails the step with a timeout diagnostic rather than leaving the run active indefinitely
 
-**Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` in a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior-round history in the prompt. The Rebase step does not synthesize a fix commit subject; `git rebase --continue` preserves the rebased commits' subjects.
+**Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` (or, under `rebase.strategy: merge`, `git commit --no-edit`) in a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior-round history in the prompt. The Rebase step does not synthesize a fix commit subject; `git rebase --continue` preserves the rebased commits' subjects. Under `rebase.strategy: merge` the resolver prompt additionally requires an **additive** resolution - keep both sides' introduced content, never delete what one side introduced merely to make the merge apply - because the resulting merge commit is what makes that claim checkable afterwards. The step does not synthesize a merge subject either; `--no-edit` keeps Git's own `Merge remote-tracking branch ...` message.
 
 **Default auto-fix limit:** `3`.
 
