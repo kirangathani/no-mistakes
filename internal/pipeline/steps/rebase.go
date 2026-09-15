@@ -692,6 +692,13 @@ func restorePreMergeHead(ctx context.Context, sctx *pipeline.StepContext, preMer
 	// it: a reset performed while a rebase is interrupted moves HEAD and leaves
 	// the rebase underneath it, so the restore would otherwise report a
 	// recovery it never performed.
+	//
+	// HEAD ATTACHMENT is deliberately not verified here. The pipeline's run
+	// worktree is created detached (`git worktree add --detach`) and no step
+	// ever checks a branch out in it, so requiring an attached HEAD would
+	// report every correct restore as a failed one. Detachment carries no
+	// signal in this worktree; the reviewed-commit comparison above is what
+	// proves the restore.
 	if rebaseInProgress(ctx, sctx.WorkDir) {
 		return fmt.Errorf("%w; restoring the branch to %s left a rebase in progress", cause, preMergeHead)
 	}

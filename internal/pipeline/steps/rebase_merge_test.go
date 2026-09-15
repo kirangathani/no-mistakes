@@ -336,6 +336,14 @@ func TestRebaseStep_DefaultStrategyStillRebasesUnchanged(t *testing.T) {
 
 func fixtureGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	if err := runFixtureGit(dir, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runFixtureGit owns the fixture git environment for both callers and returns
+// the failure rather than deciding what it means.
+func runFixtureGit(dir string, args ...string) error {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
@@ -344,8 +352,9 @@ func fixtureGit(t *testing.T, dir string, args ...string) {
 		"GIT_EDITOR=true",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatal(fmt.Errorf("git %v: %s: %w", args, out, err))
+		return fmt.Errorf("git %v: %s: %w", args, out, err)
 	}
+	return nil
 }
 
 // An agent can also end the conflict by abandoning it: `git merge --abort`
@@ -551,14 +560,7 @@ func TestRebaseStep_MergeStrategyResetOntoTargetFails(t *testing.T) {
 // non-zero, which a conflicted rebase does.
 func fixtureGitAllowFail(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-		"GIT_EDITOR=true",
-	)
-	_, _ = cmd.CombinedOutput()
+	_ = runFixtureGit(dir, args...)
 }
 
 // Abandoning the merge and rebasing onto the same target hits the same
