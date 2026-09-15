@@ -39,10 +39,11 @@ import (
 //     existing no-surface verdict and marks it automatic. Unlike the agent's
 //     own no-surface it does not park: the classification is mechanical, so
 //     there is nothing for a human to decide.
-//  2. An earlier run on the SAME branch recorded a go verdict at head H0 and
-//     no product file has changed between H0 and this head. That verdict still
-//     describes this head's product behavior, so it is recorded again with a
-//     pointer to the run and evidence directory that earned it.
+//  2. This branch's NEWEST recorded test verdict is a go, earned at head H0
+//     under the same user intent this run carries, and no product file has
+//     changed between H0 and this head. That verdict still describes this
+//     head's product behavior against the same acceptance criteria, so it is
+//     recorded again with a pointer to the run that earned it.
 //
 // Everything else runs the agent, and so does any failure to establish either
 // condition: the gate fails open to today's behavior rather than guessing.
@@ -189,6 +190,14 @@ func matchNonProductPattern(file, pattern string) bool {
 // is taken from the head the prior verdict actually names, so a verdict
 // recorded for a head that is no longer reachable simply fails the git read
 // and does not reuse.
+//
+// Same-intent is the fourth narrowing condition, and it is about what the
+// verdict MEANS rather than what the product does. The evidence turn derives
+// its scenarios from the run's user intent, and an --intent supplied one is
+// AUTHORITATIVE acceptance criteria the change must satisfy, so a verdict
+// earned under intent A says nothing about intent B even at a byte-identical
+// product state: republishing it would publish go for criteria no scenario
+// ever exercised. sameRunIntent therefore fails open on any absence.
 func reusableBranchVerdict(sctx *pipeline.StepContext, nonProduct []string) (testEvidenceDecision, bool) {
 	if sctx.DB == nil || sctx.Run == nil {
 		return testEvidenceDecision{}, false
@@ -199,6 +208,9 @@ func reusableBranchVerdict(sctx *pipeline.StepContext, nonProduct []string) (tes
 		return testEvidenceDecision{}, false
 	}
 	if prior == nil {
+		return testEvidenceDecision{}, false
+	}
+	if !sameRunIntent(sctx.Run.Intent, prior.Intent) {
 		return testEvidenceDecision{}, false
 	}
 	findings, parseErr := types.ParseFindingsJSON(prior.FindingsJSON)
@@ -224,21 +236,58 @@ func reusableBranchVerdict(sctx *pipeline.StepContext, nonProduct []string) (tes
 	return reuseDecision(sctx, prior.RunID, findings), true
 }
 
+// sameRunIntent reports whether two runs were validated against the same
+// acceptance criteria. An absent intent on EITHER side is a difference, not a
+// match: "no recorded intent" is an unknown, and two unknowns are not evidence
+// of being the same. Whitespace is trimmed so reflowing the same text is not
+// read as a changed criterion.
+func sameRunIntent(current *string, prior string) bool {
+	if current == nil {
+		return false
+	}
+	mine := strings.TrimSpace(*current)
+	return mine != "" && mine == strings.TrimSpace(prior)
+}
+
 func reuseDecision(sctx *pipeline.StepContext, priorRunID string, prior Findings) testEvidenceDecision {
 	reused := Findings{
 		Scenarios: prior.Scenarios,
 		Verdict:   types.TestVerdictGo,
 	}
+	// Reuse chains: a reused verdict is itself reusable, which is the whole
+	// point on a branch that re-runs several times. An UNCONDITIONAL evidence
+	// pointer is wrong precisely because of that. A gated run's own evidence
+	// directory is created before the gate is consulted and then left empty -
+	// nothing is written when the agent is skipped - so naming the immediate
+	// predecessor from the third run onward would send a reviewer to an empty
+	// directory as the basis for a go verdict. Only a run that actually drove
+	// the agent holds artifacts, so when the predecessor is itself a reuse we
+	// carry ITS reason forward, which keeps naming the originating run.
+	provenance := fmt.Sprintf("reused from run %s (evidence: %s)", priorRunID, priorRunEvidenceDir(sctx, priorRunID))
+	if prior.EvidenceSource == types.TestEvidenceSourceReused {
+		provenance = carriedProvenance(prior.EvidenceReason, priorRunID)
+	}
 	return testEvidenceDecision{
 		Source: types.TestEvidenceSourceReused,
 		Reason: fmt.Sprintf(
-			"product files unchanged since %s; reused from run %s (evidence: %s)",
+			"product files unchanged since %s; %s",
 			shortSHA(prior.TestedHeadSHA),
-			priorRunID,
-			priorRunEvidenceDir(sctx, priorRunID),
+			provenance,
 		),
 		Reused: reused,
 	}
+}
+
+// carriedProvenance extracts the originating run's pointer from a reused
+// verdict's own recorded reason, so a chain keeps naming the run that holds
+// the artifacts instead of the empty directory of the run it read them from.
+// An unreadable predecessor reason names only the run id, never a directory
+// this run cannot vouch for.
+func carriedProvenance(priorReason, priorRunID string) string {
+	if _, carried, found := strings.Cut(priorReason, "; "); found && strings.HasPrefix(carried, "reused from run ") {
+		return carried
+	}
+	return fmt.Sprintf("reused from run %s", priorRunID)
 }
 
 // priorRunEvidenceDir names where the reused run's artifacts are on this

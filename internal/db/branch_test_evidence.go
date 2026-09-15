@@ -10,9 +10,15 @@ import (
 
 // BranchTestEvidence is one earlier run's recorded test findings on this
 // branch, paired with the run it belongs to so a reuse can point at it.
+//
+// Intent is that run's recorded user intent, which is nullable because most
+// runs carry none. It rides along because the live-evidence turn derives its
+// scenarios FROM the intent, so a verdict is only evidence about the
+// acceptance criteria it was earned against.
 type BranchTestEvidence struct {
 	RunID        string
 	FindingsJSON string
+	Intent       string
 }
 
 // GetBranchTestEvidence returns the single most recently completed test step
@@ -29,8 +35,9 @@ type BranchTestEvidence struct {
 // and the caller falls through to running the evidence agent.
 func (d *DB) GetBranchTestEvidence(repoID, branch, excludeRunID string) (*BranchTestEvidence, error) {
 	var entry BranchTestEvidence
+	var intent sql.NullString
 	err := d.sql.QueryRow(
-		`SELECT res.run_id, res.findings_json
+		`SELECT res.run_id, res.findings_json, r.intent
 		   FROM step_results res
 		   JOIN runs r ON r.id = res.run_id
 		  WHERE r.repo_id = ? AND r.branch = ? AND r.id != ?
@@ -40,12 +47,13 @@ func (d *DB) GetBranchTestEvidence(repoID, branch, excludeRunID string) (*Branch
 		  LIMIT 1`,
 		repoID, branch, excludeRunID,
 		string(types.StepTest), string(types.StepStatusCompleted),
-	).Scan(&entry.RunID, &entry.FindingsJSON)
+	).Scan(&entry.RunID, &entry.FindingsJSON, &intent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get branch test evidence: %w", err)
 	}
+	entry.Intent = intent.String
 	return &entry, nil
 }

@@ -31,6 +31,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
@@ -102,7 +103,31 @@ func gateOffContext(t *testing.T, ag agent.Agent, dir, baseSHA, headSHA string) 
 	sctx.Run.HeadSHA = headSHA
 	sctx.Config.Test.EvidenceGate = config.DefaultTestEvidenceGate
 	sctx.Config.Test.NonProductPaths = append([]string(nil), config.DefaultNonProductPaths...)
+	setRunIntent(t, sctx, sctx.Run.ID, gateTestIntent)
 	return sctx
+}
+
+// gateTestIntent is the user intent every case shares by default. Reuse
+// requires the prior run and this run to carry the SAME intent, so a case that
+// means to exercise some OTHER reuse condition has to satisfy this one first -
+// otherwise it would pass while the intent rule alone declined reuse and the
+// condition it was written for was never reached.
+const gateTestIntent = "ship the checkout success screen"
+
+// setRunIntent records intent on a run both in the database, which is where
+// reuse reads the PRIOR run's intent from, and on the in-memory run, which is
+// where it reads THIS run's. An empty intent leaves the run without one.
+func setRunIntent(t *testing.T, sctx *pipeline.StepContext, runID, intent string) {
+	t.Helper()
+	if intent == "" {
+		return
+	}
+	if err := sctx.DB.UpdateRunIntent(runID, db.RunIntent{Summary: intent, Source: "user", SessionID: "test", Score: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if sctx.Run != nil && sctx.Run.ID == runID {
+		sctx.Run.Intent = &intent
+	}
 }
 
 func parseOutcomeFindings(t *testing.T, outcome *pipeline.StepOutcome) types.Findings {
@@ -128,17 +153,25 @@ func shortSHA(sha string) string {
 // later run may reuse.
 func recordPriorGoVerdict(t *testing.T, sctx *pipeline.StepContext, headSHA string) string {
 	t.Helper()
-	return recordPriorVerdict(t, sctx, headSHA, types.TestVerdictGo)
+	return recordPriorVerdictWithIntent(t, sctx, headSHA, types.TestVerdictGo, gateTestIntent)
 }
 
 // recordPriorVerdict is recordPriorGoVerdict for any verdict, so a case can
 // shape what this branch's evidence history actually says.
 func recordPriorVerdict(t *testing.T, sctx *pipeline.StepContext, headSHA, verdict string) string {
 	t.Helper()
+	return recordPriorVerdictWithIntent(t, sctx, headSHA, verdict, gateTestIntent)
+}
+
+// recordPriorVerdictWithIntent additionally chooses the intent that prior run
+// was validated under; an empty one leaves it with none.
+func recordPriorVerdictWithIntent(t *testing.T, sctx *pipeline.StepContext, headSHA, verdict, intent string) string {
+	t.Helper()
 	run, err := sctx.DB.InsertRun(sctx.Run.RepoID, sctx.Run.Branch, headSHA, sctx.Run.BaseSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
+	setRunIntent(t, sctx, run.ID, intent)
 	step, err := sctx.DB.InsertStepResult(run.ID, types.StepTest)
 	if err != nil {
 		t.Fatal(err)
@@ -369,6 +402,164 @@ func TestTestStep_ReusesAGoVerdictWhenProductFilesAreUnchanged(t *testing.T) {
 	}
 }
 
+// TestTestStep_IntentChangeDefeatsReuse: the evidence turn derives its
+// scenarios from the run's user intent, and an --intent supplied one is
+// authoritative acceptance criteria. A refined intent at a byte-identical
+// product state therefore has criteria no earlier scenario ever exercised, so
+// republishing the earlier go would publish a verdict for them. Absence on
+// either side is a difference too - "no recorded intent" is an unknown, and
+// two unknowns are not evidence of sameness - so every case here must still
+// pay for the turn.
+func TestTestStep_IntentChangeDefeatsReuse(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		priorIntent string
+		thisIntent  string
+	}{
+		{name: "refined intent", priorIntent: gateTestIntent, thisIntent: gateTestIntent + "; must reject an expired token with 401"},
+		{name: "absent on this run", priorIntent: gateTestIntent, thisIntent: ""},
+		{name: "absent on the prior run", priorIntent: "", thisIntent: gateTestIntent},
+		{name: "absent on both", priorIntent: "", thisIntent: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, _ := stepstest.SetupGitRepo(t)
+			validated := commitFiles(t, dir, "product change", map[string]string{
+				"internal/checkout/checkout.go": "package checkout\n",
+			})
+			head := commitFiles(t, dir, "docs follow-up", map[string]string{"docs/guide.md": "# guide\n"})
+			ag := gateAgent()
+			sctx := gateContext(t, ag, dir, baseSHA, head)
+			sctx.Run.Intent = nil
+			if tc.thisIntent != "" {
+				mine := tc.thisIntent
+				sctx.Run.Intent = &mine
+			}
+			recordPriorVerdictWithIntent(t, sctx, validated, types.TestVerdictGo, tc.priorIntent)
+
+			outcome, err := (&steps.TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ag.Calls) != 1 {
+				t.Fatalf("evidence agent invocations = %d, want 1 (the verdict was earned under other criteria)", len(ag.Calls))
+			}
+			if got := parseOutcomeFindings(t, outcome).EvidenceSource; got != types.TestEvidenceSourceAgent {
+				t.Fatalf("evidence source = %q, want %q", got, types.TestEvidenceSourceAgent)
+			}
+		})
+	}
+}
+
+// TestTestStep_ChainedReuseKeepsPointingAtTheRunThatHoldsTheEvidence drives
+// the flagship case - agent, then two decision-only re-runs - and pins the
+// provenance. A gated run's own evidence directory is created before the gate
+// is consulted and then left empty, so naming the immediate predecessor from
+// the third run onward would send a reviewer to an empty directory as the
+// basis for a go verdict.
+func TestTestStep_ChainedReuseKeepsPointingAtTheRunThatHoldsTheEvidence(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := stepstest.SetupGitRepo(t)
+	validated := commitFiles(t, dir, "product change", map[string]string{
+		"internal/checkout/checkout.go": "package checkout\n",
+	})
+
+	// R1 drives the agent and is the only run that holds artifacts.
+	r1Agent := gateAgent()
+	r1 := gateContext(t, r1Agent, dir, baseSHA, validated)
+	r1Outcome, err := (&steps.TestStep{}).Execute(r1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r1Agent.Calls) != 1 {
+		t.Fatalf("R1 evidence agent invocations = %d, want 1", len(r1Agent.Calls))
+	}
+	persistTestOutcome(t, r1, r1.Run.ID, r1Outcome)
+
+	// R2 and R3 advance the branch with docs only and reuse in turn, sharing
+	// R1's database so each lookup is the real query over the previous run's
+	// recorded findings rather than a hand-built fixture.
+	r2Head := commitFiles(t, dir, "docs follow-up", map[string]string{"docs/guide.md": "# guide\n"})
+	r2Agent := gateAgent()
+	r2 := reRunOnSameBranch(t, r1, r2Agent, r2Head)
+	r2Findings := executeReusingRun(t, r2, r2Agent, "R2")
+
+	r3Head := commitFiles(t, dir, "more docs", map[string]string{"docs/more.md": "# more\n"})
+	r3Agent := gateAgent()
+	r3 := reRunOnSameBranch(t, r1, r3Agent, r3Head)
+	r3Findings := executeReusingRun(t, r3, r3Agent, "R3")
+
+	r2EvidenceDir := filepath.Join(filepath.Dir(r1.EvidenceDir), r2.Run.ID)
+	if strings.Contains(r3Findings.EvidenceReason, r2EvidenceDir) {
+		t.Fatalf("R3 reason %q points at R2's empty evidence directory", r3Findings.EvidenceReason)
+	}
+	if !strings.Contains(r3Findings.EvidenceReason, r1.Run.ID) {
+		t.Fatalf("R3 reason %q no longer names run %s, which is the only run holding artifacts", r3Findings.EvidenceReason, r1.Run.ID)
+	}
+	for _, f := range []types.Findings{r2Findings, r3Findings} {
+		if len(f.Scenarios) != 1 || f.Scenarios[0].Name != "user reaches the success screen" {
+			t.Fatalf("scenarios = %+v, want the originating run's scenario list to survive the chain", f.Scenarios)
+		}
+	}
+}
+
+// reRunOnSameBranch builds the next run of the same branch against the SAME
+// database, repository and evidence root as the first, which is what makes the
+// reuse lookup in these cases real.
+func reRunOnSameBranch(t *testing.T, first *pipeline.StepContext, ag *stepstest.MockAgent, headSHA string) *pipeline.StepContext {
+	t.Helper()
+	next := gateContext(t, ag, first.WorkDir, first.Run.BaseSHA, headSHA)
+	next.DB = first.DB
+	next.Repo = first.Repo
+	run, err := first.DB.InsertRun(first.Run.RepoID, first.Run.Branch, headSHA, first.Run.BaseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.Run = run
+	next.Run.HeadSHA = headSHA
+	next.EvidenceDir = filepath.Join(filepath.Dir(first.EvidenceDir), run.ID)
+	setRunIntent(t, next, run.ID, gateTestIntent)
+	return next
+}
+
+// executeReusingRun runs the step, asserts it reused rather than paying for
+// the turn, and records the result so the NEXT run of the branch reads it the
+// way the executor would. The step itself does not persist step_results.
+func executeReusingRun(t *testing.T, sctx *pipeline.StepContext, ag *stepstest.MockAgent, label string) types.Findings {
+	t.Helper()
+	outcome, err := (&steps.TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.Calls) != 0 {
+		t.Fatalf("%s evidence agent invocations = %d, want 0", label, len(ag.Calls))
+	}
+	findings := parseOutcomeFindings(t, outcome)
+	if findings.EvidenceSource != types.TestEvidenceSourceReused {
+		t.Fatalf("%s evidence source = %q, want %q", label, findings.EvidenceSource, types.TestEvidenceSourceReused)
+	}
+	persistTestOutcome(t, sctx, sctx.Run.ID, outcome)
+	return findings
+}
+
+// persistTestOutcome completes a Test step row carrying the outcome's findings,
+// which is the executor's job in a real run and what the branch-evidence query
+// reads.
+func persistTestOutcome(t *testing.T, sctx *pipeline.StepContext, runID string, outcome *pipeline.StepOutcome) {
+	t.Helper()
+	step, err := sctx.DB.InsertStepResult(runID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetStepFindings(step.ID, outcome.Findings); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.CompleteStep(step.ID, 0, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestTestStep_ProductChangeSinceAGoVerdictRerunsTheAgent is the other half of
 // reuse: the moment a product file moves, the prior verdict stops describing
 // this head and the agent runs.
@@ -409,24 +600,7 @@ func TestTestStep_NonGoVerdictIsNeverReused(t *testing.T) {
 	ag := gateAgent()
 	sctx := gateContext(t, ag, dir, baseSHA, head)
 
-	run, err := sctx.DB.InsertRun(sctx.Run.RepoID, sctx.Run.Branch, validated, baseSHA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	step, err := sctx.DB.InsertStepResult(run.ID, types.StepTest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := json.Marshal(types.Findings{Verdict: types.TestVerdictInconclusive, TestedHeadSHA: validated})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.SetStepFindings(step.ID, string(raw)); err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.CompleteStep(step.ID, 0, 1, ""); err != nil {
-		t.Fatal(err)
-	}
+	recordPriorVerdict(t, sctx, validated, types.TestVerdictInconclusive)
 
 	if _, err := (&steps.TestStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)

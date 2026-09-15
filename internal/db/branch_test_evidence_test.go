@@ -102,6 +102,57 @@ func TestGetBranchTestEvidence_ReturnsOnlyTheNewestCompletion(t *testing.T) {
 	}
 }
 
+// The reuse decision compares the intent a verdict was earned under, so the
+// query must carry it. runs.intent is nullable and most runs carry none, which
+// must read as an empty intent rather than a scan error - an error there would
+// be logged and silently decline reuse forever.
+func TestGetBranchTestEvidence_CarriesTheRunsIntentAndToleratesItsAbsence(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo(t.TempDir(), "https://example.invalid/a", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := func(branch, intent string) {
+		run, err := d.InsertRun(repo.ID, branch, "head-"+branch, "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if intent != "" {
+			if err := d.UpdateRunIntent(run.ID, RunIntent{Summary: intent, Source: "user", SessionID: "s", Score: 1}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		sr, err := d.InsertStepResult(run.ID, types.StepTest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.SetStepFindings(sr.ID, `{"findings":[],"summary":"","verdict":"go","tested_head_sha":"abc123"}`); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.CompleteStep(sr.ID, 0, 1, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("with-intent", "ship the checkout success screen")
+	seed("no-intent", "")
+
+	got, err := d.GetBranchTestEvidence(repo.ID, "with-intent", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Intent != "ship the checkout success screen" {
+		t.Fatalf("entry = %+v, want the run's recorded intent", got)
+	}
+
+	got, err = d.GetBranchTestEvidence(repo.ID, "no-intent", "none")
+	if err != nil {
+		t.Fatalf("a run with no intent must not fail the query: %v", err)
+	}
+	if got == nil || got.Intent != "" {
+		t.Fatalf("entry = %+v, want an empty intent", got)
+	}
+}
+
 // Nothing recorded on the branch is not an error: the caller simply falls
 // through to running the evidence agent.
 func TestGetBranchTestEvidence_NoEvidenceIsNotAnError(t *testing.T) {
