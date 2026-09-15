@@ -101,6 +101,21 @@ func parents(t *testing.T, dir, rev string) []string {
 	return fields[1:]
 }
 
+// assertRestoredToReviewedHead is what every rejected merge shape owes the run:
+// the step fails, and the worktree is left back on the head the pipeline
+// reviewed with nothing of the rejected attempt staged, modified, or untracked
+// on top of it. Anything else leaves the invalid head checked out as if it were
+// the branch's real state.
+func assertRestoredToReviewedHead(t *testing.T, dir, reviewedHead string) {
+	t.Helper()
+	if head := gitCmd(t, dir, "rev-parse", "HEAD"); head != reviewedHead {
+		t.Fatalf("head after the rejected merge = %s, want the reviewed head %s restored", head, reviewedHead)
+	}
+	if status := gitCmd(t, dir, "status", "--porcelain"); status != "" {
+		t.Fatalf("worktree after the rejected merge is not clean:\n%s", status)
+	}
+}
+
 func TestRebaseStep_MergeStrategyIntegratesMovedBaseAsAMergeCommit(t *testing.T) {
 	t.Parallel()
 	f := newMergeFixture(t, false)
@@ -361,9 +376,7 @@ func TestRebaseStep_MergeStrategyAbortedMergeFails(t *testing.T) {
 	if mergeInProgress(context.Background(), f.dir) {
 		t.Fatal("merge left in progress after the abort")
 	}
-	if head := gitCmd(t, f.dir, "rev-parse", "HEAD"); head != f.headSHA {
-		t.Fatalf("head = %s, want the reviewed head %s", head, f.headSHA)
-	}
+	assertRestoredToReviewedHead(t, f.dir, f.headSHA)
 }
 
 // Ending the conflict by rebasing onto the target instead satisfies ancestry -
@@ -375,11 +388,16 @@ func TestRebaseStep_MergeStrategyRebasedInsteadOfMergedFails(t *testing.T) {
 	t.Parallel()
 	f := newMergeFixture(t, true)
 
+	// The head the agent actually left is captured inside the turn, because the
+	// step restores the worktree off it before returning; the fixture-integrity
+	// assertions still have to be made against that head, not the restored one.
+	var rebasedHead string
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixtureGit(t, f.dir, "merge", "--abort")
 			fixtureGit(t, f.dir, "rebase", "--strategy-option=theirs", "origin/main")
+			rebasedHead = gitCmd(t, f.dir, "rev-parse", "HEAD")
 			return &agent.Result{Output: json.RawMessage(`{"summary":"rebased"}`)}, nil
 		},
 	}
@@ -395,13 +413,13 @@ func TestRebaseStep_MergeStrategyRebasedInsteadOfMergedFails(t *testing.T) {
 		t.Fatalf("error = %v, want it to name the missing merge", err)
 	}
 
-	head := gitCmd(t, f.dir, "rev-parse", "HEAD")
-	if got := parents(t, f.dir, head); len(got) != 1 {
+	if got := parents(t, f.dir, rebasedHead); len(got) != 1 {
 		t.Fatalf("fixture no longer produces a rebase-shaped head: parents %v", got)
 	}
-	if !isAncestor(context.Background(), f.dir, f.mainSHA, head) {
+	if !isAncestor(context.Background(), f.dir, f.mainSHA, rebasedHead) {
 		t.Fatal("fixture no longer satisfies plain ancestry; the test proves nothing")
 	}
+	assertRestoredToReviewedHead(t, f.dir, f.headSHA)
 }
 
 // Nothing forbids the agent from committing again after concluding the merge -
@@ -450,6 +468,7 @@ func TestRebaseStep_MergeStrategyUnrelatedCommitInsteadOfMergeFails(t *testing.T
 	t.Parallel()
 	f := newMergeFixture(t, true)
 
+	var unrelatedHead string
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -457,6 +476,7 @@ func TestRebaseStep_MergeStrategyUnrelatedCommitInsteadOfMergeFails(t *testing.T
 			writeFixtureFile(t, f.dir, "unrelated.txt", "not the merge\n")
 			fixtureGit(t, f.dir, "add", "unrelated.txt")
 			fixtureGit(t, f.dir, "commit", "-m", "unrelated work")
+			unrelatedHead = gitCmd(t, f.dir, "rev-parse", "HEAD")
 			return &agent.Result{Output: json.RawMessage(`{"summary":"committed something else"}`)}, nil
 		},
 	}
@@ -472,16 +492,57 @@ func TestRebaseStep_MergeStrategyUnrelatedCommitInsteadOfMergeFails(t *testing.T
 		t.Fatalf("error = %v, want it to name the missing merge", err)
 	}
 
-	// Fixture integrity: this head must be one ONLY the target-ancestry check
-	// can reject, or the test proves nothing about that check.
-	head := gitCmd(t, f.dir, "rev-parse", "HEAD")
-	if head == f.headSHA {
+	// Fixture integrity: the head the agent left must be one ONLY the
+	// target-ancestry check can reject, or the test proves nothing about that
+	// check. It is read from the capture, not from HEAD, because the step has
+	// since restored the worktree off it.
+	if unrelatedHead == f.headSHA {
 		t.Fatal("fixture left HEAD unmoved; the moved-head check would reject this instead")
 	}
-	if !isAncestor(context.Background(), f.dir, f.headSHA, head) {
+	if !isAncestor(context.Background(), f.dir, f.headSHA, unrelatedHead) {
 		t.Fatal("fixture dropped the reviewed head; the reviewed-head check would reject this instead")
 	}
-	if isAncestor(context.Background(), f.dir, f.mainSHA, head) {
+	if isAncestor(context.Background(), f.dir, f.mainSHA, unrelatedHead) {
 		t.Fatal("fixture integrated the target after all; the test proves nothing")
 	}
+	assertRestoredToReviewedHead(t, f.dir, f.headSHA)
+}
+
+// Resetting hard onto the target is the third way to end the conflict without
+// merging: the target is in HEAD and HEAD has moved, so only the reviewed-head
+// ancestry check rejects it. It is also the shape that loses the most if the
+// invalid head is retained - the reviewed commits are not in it at all.
+func TestRebaseStep_MergeStrategyResetOntoTargetFails(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, true)
+
+	var resetHead string
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			fixtureGit(t, f.dir, "merge", "--abort")
+			fixtureGit(t, f.dir, "reset", "--hard", "origin/main")
+			resetHead = gitCmd(t, f.dir, "rev-parse", "HEAD")
+			return &agent.Result{Output: json.RawMessage(`{"summary":"took theirs"}`)}, nil
+		},
+	}
+
+	sctx := f.context(t, ag, config.RebaseStrategyMerge)
+	sctx.Fixing = true
+
+	_, err := (&RebaseStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected an error when the agent reset onto the target instead of merging, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not merge") {
+		t.Fatalf("error = %v, want it to name the missing merge", err)
+	}
+
+	if resetHead != f.mainSHA {
+		t.Fatalf("fixture head = %s, want the target %s; the reset did not happen", resetHead, f.mainSHA)
+	}
+	if isAncestor(context.Background(), f.dir, f.headSHA, resetHead) {
+		t.Fatal("fixture kept the reviewed head; the test proves nothing about the reviewed-head check")
+	}
+	assertRestoredToReviewedHead(t, f.dir, f.headSHA)
 }

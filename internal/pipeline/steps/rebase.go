@@ -642,19 +642,43 @@ Instructions:
 	// out of the history.
 	head, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
-		return fmt.Errorf("get merged head: %w", err)
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("get merged head: %w", err))
 	}
 	if head == preMergeHead {
-		return fmt.Errorf("agent did not merge %s into the branch: the branch is still at %s", targetRef, preMergeHead)
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: the branch is still at %s", targetRef, preMergeHead))
 	}
 	if !isAncestor(ctx, sctx.WorkDir, preMergeHead, head) {
-		return fmt.Errorf("agent did not merge %s into the branch: the reviewed head %s is not in %s", targetRef, preMergeHead, head)
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: the reviewed head %s is not in %s", targetRef, preMergeHead, head))
 	}
 	if !isAncestor(ctx, sctx.WorkDir, targetSHA, head) {
-		return fmt.Errorf("agent did not merge %s into the branch: %s is not in %s", targetRef, targetSHA, head)
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: %s is not in %s", targetRef, targetSHA, head))
 	}
 
 	return nil
+}
+
+// restorePreMergeHead puts the worktree back on the reviewed head before a
+// shape guard's rejection is returned. Without it a rejected merge leaves the
+// branch on whatever the agent actually produced - a rebase of the reviewed
+// head, a reset onto the target, an unrelated commit - and the step fails while
+// the invalid head stays checked out, so any later hand-off, recovery, or
+// retry reads it as the branch's real state.
+//
+// It is fail-closed: a restore that does not land back exactly on
+// preMergeHead with a clean tree is reported as part of the returned error,
+// never swallowed, so nothing is described as recovered that was not.
+func restorePreMergeHead(ctx context.Context, sctx *pipeline.StepContext, preMergeHead string, cause error) error {
+	if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", preMergeHead); err != nil {
+		return fmt.Errorf("%w; restoring the branch to %s failed, the worktree is left at the rejected head: %v", cause, preMergeHead, err)
+	}
+	head, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("%w; restoring the branch to %s could not be verified: %v", cause, preMergeHead, err)
+	}
+	if head != preMergeHead {
+		return fmt.Errorf("%w; restoring the branch to %s left it at %s instead", cause, preMergeHead, head)
+	}
+	return cause
 }
 
 // shouldSkipRebase checks whether a rebase onto targetRef can be skipped.
