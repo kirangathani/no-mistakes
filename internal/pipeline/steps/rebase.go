@@ -629,6 +629,16 @@ Instructions:
 		return fmt.Errorf("agent did not complete the merge")
 	}
 
+	// A conflicted rebase is the other way the worktree can be left mid
+	// operation, and git sets no MERGE_HEAD for it: an agent that abandons the
+	// merge and rebases onto the same target hits the same conflict and stops
+	// with rebase state in place. Abort it first, or the restore below would
+	// move HEAD while the interrupted rebase survives underneath it.
+	if rebaseInProgress(ctx, sctx.WorkDir) {
+		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: a rebase was left in progress", targetRef))
+	}
+
 	// Concluded is not the same as merged. Requiring HEAD to have moved and to
 	// carry BOTH snapshots proves a merge happened, because shouldSkipRebase
 	// has already returned early unless preMergeHead and targetSHA are
@@ -677,6 +687,13 @@ func restorePreMergeHead(ctx context.Context, sctx *pipeline.StepContext, preMer
 	}
 	if head != preMergeHead {
 		return fmt.Errorf("%w; restoring the branch to %s left it at %s instead", cause, preMergeHead, head)
+	}
+	// HEAD reading as preMergeHead is not the same as the worktree being back on
+	// it: a reset performed while a rebase is interrupted moves HEAD and leaves
+	// the rebase underneath it, so the restore would otherwise report a
+	// recovery it never performed.
+	if rebaseInProgress(ctx, sctx.WorkDir) {
+		return fmt.Errorf("%w; restoring the branch to %s left a rebase in progress", cause, preMergeHead)
 	}
 	return cause
 }

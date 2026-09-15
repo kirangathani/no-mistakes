@@ -546,3 +546,60 @@ func TestRebaseStep_MergeStrategyResetOntoTargetFails(t *testing.T) {
 	}
 	assertRestoredToReviewedHead(t, f.dir, f.headSHA)
 }
+
+// fixtureGitAllowFail runs a fixture git command that is EXPECTED to exit
+// non-zero, which a conflicted rebase does.
+func fixtureGitAllowFail(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		"GIT_EDITOR=true",
+	)
+	_, _ = cmd.CombinedOutput()
+}
+
+// Abandoning the merge and rebasing onto the same target hits the same
+// conflict, so the rebase stops with rebase state in place. Git sets no
+// MERGE_HEAD for that, so the unconcluded-merge guard passes, and a reset there
+// moves HEAD while the interrupted rebase survives underneath it - a restore
+// reported as successful on a worktree still mid-rebase. The step must abort
+// the rebase and report the un-integrated target with the worktree genuinely
+// restored.
+func TestRebaseStep_MergeStrategyConflictedRebaseLeftInProgressIsAbortedAndFails(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, true)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			fixtureGit(t, f.dir, "merge", "--abort")
+			fixtureGitAllowFail(t, f.dir, "rebase", "origin/main")
+			if !rebaseInProgress(ctx, f.dir) {
+				t.Fatal("fixture no longer leaves a conflicted rebase in progress; the test proves nothing")
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"rebased instead"}`)}, nil
+		},
+	}
+
+	sctx := f.context(t, ag, config.RebaseStrategyMerge)
+	sctx.Fixing = true
+
+	_, err := (&RebaseStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected an error when the agent left a conflicted rebase in progress, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not merge") {
+		t.Fatalf("error = %v, want it to name the missing merge", err)
+	}
+
+	if rebaseInProgress(context.Background(), f.dir) {
+		t.Fatal("rebase left in progress after the rejection")
+	}
+	if ref := gitCmd(t, f.dir, "rev-parse", "refs/heads/feature"); ref != f.headSHA {
+		t.Fatalf("branch ref after the rejection = %s, want the reviewed head %s", ref, f.headSHA)
+	}
+	assertRestoredToReviewedHead(t, f.dir, f.headSHA)
+}
