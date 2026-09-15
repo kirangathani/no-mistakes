@@ -145,9 +145,11 @@ func matchNonProductPattern(file, pattern string) bool {
 	return false
 }
 
-// reusableBranchVerdict finds the most recent go verdict recorded for this
-// branch whose product files are unchanged at this head, and returns it as a
-// reuse decision.
+// reusableBranchVerdict returns a reuse decision when the most recent go
+// verdict recorded for this branch still covers this head's product files.
+//
+// Only that newest go verdict is considered. An older one necessarily spans a
+// wider diff, so if the newest does not cover this head no earlier one can.
 //
 // The rules are deliberately narrow. Only a go verdict is reusable: a no-go,
 // inconclusive, or no-surface conclusion is about a state a human has not
