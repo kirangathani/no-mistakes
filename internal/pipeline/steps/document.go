@@ -34,6 +34,7 @@ const documentPlacementPolicy = `Documentation placement policy (fail-safe defau
 - README.md owns the user-facing product introduction and common usage.
 - CONTRIBUTING.md owns contribution mechanics, not product or architecture inventories.
 - Code comments own non-obvious local intent, safety invariants, and external constraints - never prose that merely restates code.
+- Comment, test-name, and descriptive-string WORDING in code and workflow files is documentation and belongs to this pass: a comment, test name, log line, or summary string that overstates, understates, or no longer describes what the code does is corrected here. A comment whose claim is FALSE in a way that misleads a caller is a defect the review step reports as a finding, not wording.
 - Deep reference docs own detailed conditional material; link to them instead of copying them into always-loaded guidance.
 - Generated or schema-backed facts must be generated from their authoritative source and checked for drift, never hand-copied.`
 
@@ -123,13 +124,29 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		sctx.Log("updating documentation...")
 	}
 
-	prompt := s.buildPrompt(sctx, baseSHA, ignorePatterns, combinedLint)
+	docNotes, lintNotes := reviewHandoffReports(sctx)
+	if len(docNotes) > 0 {
+		sctx.Log(fmt.Sprintf("acting on %d doc note(s) from the review step", len(docNotes)))
+	}
+	if combinedLint && len(lintNotes) > 0 {
+		sctx.Log(fmt.Sprintf("acting on %d lint note(s) from the review step in the combined pass", len(lintNotes)))
+	}
+
+	prompt := s.buildPrompt(sctx, baseSHA, ignorePatterns, docNotes, lintNotes, combinedLint)
 	schema := findingsSchema
 	purpose := "document"
 	if combinedLint {
 		schema = housekeepingFindingsSchema
 		purpose = "housekeeping"
 	}
+	// The outcome list is declared only when this pass received notes to
+	// report on; see withAppliedNotesSchema for why an unconditional
+	// declaration breaks agents that have nothing to say about it.
+	handedOver := len(docNotes)
+	if combinedLint {
+		handedOver += len(lintNotes)
+	}
+	schema = withAppliedNotesSchema(schema, handedOver)
 
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -169,6 +186,9 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if combinedLint {
 		var lintFindings Findings
 		docFindings, lintFindings = splitHousekeepingFindings(findings)
+		// Each step reports the notes it was given: the lint half's outcomes
+		// ride the stash so the lint step's own row records them.
+		lintFindings.AppliedNotes = reconcileHandoffOutcomes(sctx, lintNotes, findings.AppliedNotes)
 		lintJSON, err := types.MarshalFindingsJSON(lintFindings)
 		if err == nil {
 			sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{
@@ -178,6 +198,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 			sctx.Log(fmt.Sprintf("housekeeping lint result recorded for the lint step: %d unresolved items", len(lintFindings.Items)))
 		}
 	}
+	docFindings.AppliedNotes = reconcileHandoffOutcomes(sctx, docNotes, findings.AppliedNotes)
 
 	needsApproval := len(docFindings.Items) > 0
 	findingsJSON, _ := json.Marshal(docFindings)
@@ -195,17 +216,24 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 // buildPrompt assembles the document (or combined document+lint) prompt: the
 // placement policy, scope discipline, trusted repository-specific policy,
 // the task, and - in combined mode - the lint duty.
-func (s *DocumentStep) buildPrompt(sctx *pipeline.StepContext, baseSHA, ignorePatterns string, combinedLint bool) string {
+func (s *DocumentStep) buildPrompt(sctx *pipeline.StepContext, baseSHA, ignorePatterns string, docNotes, lintNotes []types.HandoffNote, combinedLint bool) string {
 	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
+	// The review step's handoff reports: the doc report is always this step's
+	// work, and the lint report joins it only in the combined pass, where this
+	// invocation is also the lint fixer.
+	notesSection := handoffNotesPromptSection(docReportPromptHeading, docReportPromptDuty, docNotes)
+	if combinedLint {
+		notesSection += handoffNotesPromptSection(lintReportPromptHeading, lintReportPromptDuty, lintNotes)
+	}
 
 	intro := "Keep the project documentation accurate for this change."
 	if combinedLint {
 		intro = "Perform the combined documentation and lint housekeeping pass for this change."
 	}
 
-	editRule := "- Only edit documentation files or doc comments. Do not change executable behavior or tests."
+	editRule := "- Only edit documentation files, doc comments, code or workflow comments, test names, and descriptive log or summary strings. Do not change executable behavior or test assertions."
 	if combinedLint {
-		editRule = "- Documentation edits must only touch documentation files or doc comments. Lint fixes must be safe, mechanical, and behavior-preserving. Never change functional behavior or tests."
+		editRule = "- Documentation edits must only touch documentation files, doc comments, code or workflow comments, test names, and descriptive log or summary strings. Lint fixes must be safe, mechanical, and behavior-preserving. Never change functional behavior or test assertions."
 	}
 
 	prompt := fmt.Sprintf(
@@ -256,7 +284,7 @@ Rules:
 		trustedDocumentPolicySection(sctx),
 		lintDutySection(combinedLint),
 		editRule,
-		historySection,
+		historySection+notesSection,
 	)
 	if sctx.PreviousFindings != "" {
 		prompt += `

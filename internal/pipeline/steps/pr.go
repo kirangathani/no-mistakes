@@ -595,6 +595,13 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if conversationMD := buildReviewConversationSection(sctx); conversationMD != "" && pipelineMD != "" {
 		pipelineMD += "\n\n" + conversationMD
 	}
+	// The handoff reports ride beside the conversation, for the same reason
+	// and with the same droppable-group shape: they record what the reviewer
+	// deliberately did NOT park the run on, and which notes the document and
+	// lint steps applied.
+	if handoffMD := buildHandoffReportsSection(steps); handoffMD != "" && pipelineMD != "" {
+		pipelineMD += "\n\n" + handoffMD
+	}
 	// Ordinary Bitbucket descriptions keep their existing Markdown-only skin.
 	// Owned templates additionally carry the exact existing declaration as
 	// visible text; the raw consumer/restamper uses the same marker and schema.

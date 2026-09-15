@@ -318,6 +318,35 @@ type Findings struct {
 	RiskLevel      string `json:"risk_level"`
 	RiskRationale  string `json:"risk_rationale"`
 	RiskScope      string `json:"risk_scope,omitempty"`
+	// DocReport and LintReport are the review step's handoff reports: the
+	// wording and lint-catchable observations it deliberately did NOT report
+	// as findings, because the document and lint steps own those remedies and
+	// their own changes are never re-reviewed. See
+	// docs/src/content/docs/concepts/review-handoff-reports.md.
+	DocReport  []HandoffNote `json:"doc_report,omitempty"`
+	LintReport []HandoffNote `json:"lint_report,omitempty"`
+	// AppliedNotes is what a consuming step (document, lint) did with the
+	// notes it received.
+	AppliedNotes []HandoffOutcome `json:"applied_notes,omitempty"`
+}
+
+// HandoffNote is one observation the reviewer handed to a later step instead
+// of reporting it as a finding.
+type HandoffNote struct {
+	ID             string `json:"id,omitempty"`
+	File           string `json:"file,omitempty"`
+	Line           int    `json:"line,omitempty"`
+	Problem        string `json:"problem"`
+	RightLooksLike string `json:"right_looks_like,omitempty"`
+}
+
+// HandoffOutcome is a consuming step's account of one note: applied, or not
+// applied with a reason. A note the step never mentioned is reported as
+// unaddressed by the renderers, so silence is visible rather than assumed.
+type HandoffOutcome struct {
+	ID      string `json:"id"`
+	Applied bool   `json:"applied"`
+	Note    string `json:"note,omitempty"`
 }
 
 type findingsWire struct {
@@ -335,6 +364,11 @@ type findingsWire struct {
 	RiskLevel      string         `json:"risk_level"`
 	RiskRationale  string         `json:"risk_rationale"`
 	RiskScope      string         `json:"risk_scope"`
+	// A new field must be added here and copied in ParseFindingsJSON below,
+	// or it is silently dropped on every parse.
+	DocReport    []HandoffNote    `json:"doc_report"`
+	LintReport   []HandoffNote    `json:"lint_report"`
+	AppliedNotes []HandoffOutcome `json:"applied_notes"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -362,6 +396,9 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		RiskLevel:      wire.RiskLevel,
 		RiskRationale:  wire.RiskRationale,
 		RiskScope:      wire.RiskScope,
+		DocReport:      wire.DocReport,
+		LintReport:     wire.LintReport,
+		AppliedNotes:   wire.AppliedNotes,
 	}, nil
 }
 

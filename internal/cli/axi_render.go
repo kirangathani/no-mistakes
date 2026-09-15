@@ -305,6 +305,86 @@ func (rv runView) liveEvidenceSource() string {
 	return ""
 }
 
+// handoffNoteRow is one note the reviewer recorded instead of reporting it as
+// a finding, as rendered under the review step.
+type handoffNoteRow struct {
+	ID      string `toon:"id"`
+	File    string `toon:"file"`
+	Problem string `toon:"problem"`
+	Right   string `toon:"right_looks_like"`
+	Outcome string `toon:"outcome"`
+}
+
+// handoffReportRows renders the review step's doc and lint reports: what left
+// the findings list, and what the owning step did with each note.
+//
+// It reads the same step findings payloads `axi` already carries, so there is
+// no second channel that could disagree with the durable record. Empty for a
+// run whose reviewer recorded nothing, and for every run recorded before the
+// reports existed.
+func (rv runView) handoffReportRows() (doc, lint []handoffNoteRow) {
+	var docNotes, lintNotes []types.HandoffNote
+	var outcomes []types.HandoffOutcome
+	for _, s := range rv.Steps {
+		if s.FindingsJSON == "" {
+			continue
+		}
+		parsed, err := types.ParseFindingsJSON(s.FindingsJSON)
+		if err != nil {
+			continue
+		}
+		switch s.Name {
+		case string(types.StepReview):
+			docNotes, lintNotes = parsed.DocReport, parsed.LintReport
+		case string(types.StepDocument), string(types.StepLint):
+			outcomes = append(outcomes, parsed.AppliedNotes...)
+		}
+	}
+	return handoffRows(docNotes, outcomes), handoffRows(lintNotes, outcomes)
+}
+
+func handoffRows(notes []types.HandoffNote, outcomes []types.HandoffOutcome) []handoffNoteRow {
+	if len(notes) == 0 {
+		return nil
+	}
+	rows := make([]handoffNoteRow, 0, len(notes))
+	for _, note := range notes {
+		where := note.File
+		if where != "" && note.Line > 0 {
+			where = fmt.Sprintf("%s:%d", where, note.Line)
+		}
+		rows = append(rows, handoffNoteRow{
+			ID:      note.ID,
+			File:    where,
+			Problem: truncate(note.Problem, maxFindingDesc),
+			Right:   truncate(note.RightLooksLike, maxFindingDesc),
+			Outcome: handoffOutcomeLabel(outcomes, note.ID),
+		})
+	}
+	return rows
+}
+
+// handoffOutcomeLabel reports what the owning step did with one note. A note
+// whose step has not run yet reads as pending rather than dropped.
+func handoffOutcomeLabel(outcomes []types.HandoffOutcome, id string) string {
+	for _, o := range outcomes {
+		if !strings.EqualFold(strings.TrimSpace(o.ID), strings.TrimSpace(id)) {
+			continue
+		}
+		if o.Applied {
+			if note := strings.TrimSpace(o.Note); note != "" {
+				return "applied: " + truncate(note, maxFindingDesc)
+			}
+			return "applied"
+		}
+		if note := strings.TrimSpace(o.Note); note != "" {
+			return "not applied: " + truncate(note, maxFindingDesc)
+		}
+		return "not applied"
+	}
+	return "pending the owning step"
+}
+
 // findingsTally summarizes a run's findings across all steps by action, so an
 // agent sees the shape of outstanding work without a follow-up call.
 func (rv runView) findingsTally() string {
@@ -511,6 +591,16 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		}
 	}
 	fields = append(fields, toon.Field{Key: "steps", Value: rows})
+	// The review step's handoff reports: wording and lint-catchable notes it
+	// recorded instead of parking the run, with what the owning step did.
+	if docNotes, lintNotes := rv.handoffReportRows(); len(docNotes) > 0 || len(lintNotes) > 0 {
+		if len(docNotes) > 0 {
+			fields = append(fields, toon.Field{Key: "doc_report", Value: docNotes})
+		}
+		if len(lintNotes) > 0 {
+			fields = append(fields, toon.Field{Key: "lint_report", Value: lintNotes})
+		}
+	}
 	if skips := rv.automaticSkips(); len(skips) > 0 {
 		fields = append(fields, toon.Field{Key: "automatic_skips", Value: skips})
 	}

@@ -26,6 +26,14 @@ The independence guarantee `internal/pipeline/steps/review.go` documents is
 unchanged: a reviewer session never spans a code change, so a reviewer never
 certifies its own prescription.
 
+The conversation is how the reviewer resolves a question it cannot settle
+itself. What it does with an observation it *can* settle, but whose remedy
+belongs to a later step, is the separate
+[review handoff reports](/no-mistakes/concepts/review-handoff-reports/)
+mechanism: documentation and comment wording, and anything the project's lint
+command or type checker would catch, leave the findings list as notes rather
+than parking the run.
+
 ## The file protocol
 
 Every run owns a review-conversation directory under the run's evidence

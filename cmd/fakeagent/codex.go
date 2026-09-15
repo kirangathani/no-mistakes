@@ -147,11 +147,21 @@ func extractCodexOutputSchema(args []string) string {
 	return ""
 }
 
-// filterStructuredToSchema drops fields from structured that are not
-// declared as properties on the top-level object schema at schemaPath.
-// Real codex would not emit undeclared fields under --output-schema, so
-// mirroring that behaviour keeps the fake consistent with no-mistakes'
-// additionalProperties:false validation. schemaPath == "" is a no-op.
+// filterStructuredToSchema makes a canned payload look like real codex output
+// for the schema at schemaPath: it drops fields the schema does not declare,
+// and supplies null for a declared, nullable field the payload omits.
+//
+// Both halves mirror what the codex adapter does to the schema it sends
+// (internal/agent/codex.go codexOutputSchema): it sets
+// additionalProperties:false, so an undeclared field is rejected, and it
+// rewrites EVERY declared property as required while making the ones that were
+// optional nullable. Real codex is constrained by that schema server-side and
+// therefore always emits every declared key; a canned scenario cannot know
+// which keys a newly added optional property introduced, and used to fail with
+// `missing required field` on that backend alone the moment the pipeline
+// declared one. Nullability is the discriminator: only a property the original
+// schema left optional is nullable, so a genuinely missing REQUIRED field
+// still fails exactly as before. schemaPath == "" is a no-op.
 func filterStructuredToSchema(structured map[string]any, schemaPath string) (map[string]any, error) {
 	if schemaPath == "" {
 		return structured, nil
@@ -174,7 +184,36 @@ func filterStructuredToSchema(structured map[string]any, schemaPath string) (map
 			filtered[key] = value
 		}
 	}
+	for key, property := range properties {
+		if _, ok := filtered[key]; ok {
+			continue
+		}
+		if schemaAllowsNull(property) {
+			filtered[key] = nil
+		}
+	}
 	return filtered, nil
+}
+
+// schemaAllowsNull reports whether a property schema accepts null, which for a
+// codex-normalized schema means the original schema left that property
+// optional.
+func schemaAllowsNull(property any) bool {
+	schema, ok := property.(map[string]any)
+	if !ok {
+		return false
+	}
+	switch typ := schema["type"].(type) {
+	case string:
+		return typ == "null"
+	case []any:
+		for _, item := range typ {
+			if name, ok := item.(string); ok && name == "null" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // extractCodexPrompt mirrors Codex's stdin prompt contract. Real codex argv is
