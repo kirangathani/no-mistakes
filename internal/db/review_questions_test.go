@@ -1,6 +1,11 @@
 package db
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
 
 func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 	d := openTestDB(t)
@@ -151,5 +156,93 @@ func TestRecordReviewAnswerRequiresItsKey(t *testing.T) {
 	}
 	if err := d.RecordReviewAnswer(ReviewAnswer{RepoID: "r", Branch: "feature", Answer: "a"}); err == nil {
 		t.Fatal("want error with no question id")
+	}
+}
+
+// TestGetPreviousRunReviewRoundsDoesNotDeadlockTheSingleConnection is a real
+// regression: the first version of this query held an open *sql.Rows while
+// calling GetRoundsByStep, and this pool is SetMaxOpenConns(1), so the nested
+// query waited forever for the connection its own caller held. It presented as
+// a pipeline run wedged at the review step with no error anywhere - one
+// `internal/daemon` test hit its 10-minute package timeout with the goroutine
+// parked in database/sql's connection wait.
+//
+// The bound makes the assertion real rather than decorative: on the old code
+// this test never returns, so it fails by timeout instead of passing quietly.
+func TestGetPreviousRunReviewRoundsDoesNotDeadlockTheSingleConnection(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/work/repo", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := d.InsertRun(repo.ID, "feature", "old-head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := d.InsertRun(repo.ID, "feature", "new-head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sr, err := d.InsertStepResult(previous.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"f-1","severity":"error","description":"drops the straggler","action":"ask-user"}],"risk_level":"high","risk_rationale":"bug","risk_scope":"source-or-external"}`
+	if _, err := d.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		got *PreviousReviewRounds
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		got, err := d.GetPreviousRunReviewRounds(repo.ID, "feature", current.ID)
+		done <- result{got, err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("GetPreviousRunReviewRounds: %v", r.err)
+		}
+		if r.got == nil || r.got.RunID != previous.ID || len(r.got.Rounds) != 1 {
+			t.Fatalf("result = %#v, want the previous run's single round", r.got)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("GetPreviousRunReviewRounds deadlocked: a nested query cannot run while its caller holds the only connection")
+	}
+}
+
+// No previous run, and a previous run whose review recorded no round, both read
+// as "nothing to carry forward" rather than an error, so an ordinary first run
+// on a branch is unaffected.
+func TestGetPreviousRunReviewRoundsReportsNothingToCarryForward(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/work/repo", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := d.GetPreviousRunReviewRounds(repo.ID, "feature", current.ID)
+	if err != nil || got != nil {
+		t.Fatalf("no previous run = (%#v, %v), want (nil, nil)", got, err)
+	}
+
+	previous, err := d.InsertRun(repo.ID, "feature", "old-head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepResult(previous.ID, types.StepReview); err != nil {
+		t.Fatal(err)
+	}
+	got, err = d.GetPreviousRunReviewRounds(repo.ID, "feature", current.ID)
+	if err != nil || got != nil {
+		t.Fatalf("previous run with no rounds = (%#v, %v), want (nil, nil)", got, err)
 	}
 }

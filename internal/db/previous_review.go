@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -30,8 +32,17 @@ type PreviousReviewRounds struct {
 // run": a superseded run is not marked as such, the branch's own run history
 // is the record, and the immediately preceding run is the one whose rounds
 // describe the findings this push was answering.
+// The step lookup is QueryRow, not Query, and that is load-bearing rather than
+// stylistic: this pool is SetMaxOpenConns(1) (see Open), so the one connection
+// an open *sql.Rows holds is the only connection there is. Calling
+// GetRoundsByStep with those rows still open deadlocks the whole process - the
+// nested query waits for a connection its own caller is holding, forever, and
+// what an operator sees is a pipeline run wedged at the review step with no
+// error anywhere. QueryRow().Scan releases the connection before returning, so
+// the second query is free to take it.
 func (d *DB) GetPreviousRunReviewRounds(repoID, branch, excludeRunID string) (*PreviousReviewRounds, error) {
-	rows, err := d.sql.Query(
+	var runID, stepResultID string
+	err := d.sql.QueryRow(
 		`SELECT res.run_id, res.id
 		   FROM step_results res
 		   JOIN runs r ON r.id = res.run_id
@@ -39,20 +50,12 @@ func (d *DB) GetPreviousRunReviewRounds(repoID, branch, excludeRunID string) (*P
 		  ORDER BY r.created_at DESC, r.id DESC
 		  LIMIT 1`,
 		repoID, branch, excludeRunID, string(types.StepReview),
-	)
+	).Scan(&runID, &stepResultID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get previous run review step: %w", err)
-	}
-	defer rows.Close()
-	var runID, stepResultID string
-	if !rows.Next() {
-		return nil, rows.Err()
-	}
-	if err := rows.Scan(&runID, &stepResultID); err != nil {
-		return nil, fmt.Errorf("scan previous run review step: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 
 	rounds, err := d.GetRoundsByStep(stepResultID)
