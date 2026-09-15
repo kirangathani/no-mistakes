@@ -86,7 +86,8 @@ rebase:
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
-  # branch_pattern: '([A-Z]+-[0-9]+)'
+  # branch_pattern: '^PROJ/([0-9]+)$'
+  # branch_replacement: 'PROJ-${1}'
   # To use the captured identifier in the subject:
   # fix_message: "{{.Branch}}: {{.Summary}}"
 
@@ -699,7 +700,7 @@ The template supports literal text and three Go-style placeholders:
 | --- | --- |
 | `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, `ci`, or `gate.test.mutation-budget` |
 | `{{.Summary}}` | Sanitized one-line summary returned by the fix agent, or the step's deterministic fallback summary |
-| `{{.Branch}}` | Normalized branch name, or the identifier captured by [`commit.branch_pattern`](#commitbranch_pattern) |
+| `{{.Branch}}` | Normalized branch name, or the identifier captured and optionally transformed by [`commit.branch_pattern`](#commitbranch_pattern) and [`commit.branch_replacement`](#commitbranch_replacement) |
 
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
 The template source is limited to 1,024 bytes and 16 placeholders.
@@ -722,9 +723,34 @@ Optional regular expression for extracting the value exposed as `{{.Branch}}` to
 | Default | Unset, so `{{.Branch}}` is the normalized full branch name |
 
 The expression is limited to 1,024 bytes, must be valid UTF-8, must exclude the same control and unsafe Unicode format characters as `commit.fix_message`, and must compile with exactly one capture group.
-The first capture group becomes `{{.Branch}}`, so `([A-Z]+-[0-9]+)` extracts `PROJ-123` from `feature/PROJ-123-add-widget`.
+Without [`commit.branch_replacement`](#commitbranch_replacement), that capture group becomes `{{.Branch}}`, so `([A-Z]+-[0-9]+)` extracts `PROJ-123` from `feature/PROJ-123-add-widget`.
+For example, this global configuration renders `PROJ-123: preserve legacy drafts` from branch `PROJ/123`:
+
+```yaml
+commit:
+  branch_pattern: '^PROJ/([0-9]+)$'
+  branch_replacement: 'PROJ-${1}'
+  fix_message: "{{.Branch}}: {{.Summary}}"
+```
+
 When a template uses `{{.Branch}}` and the pattern does not find a non-empty identifier, rendering fails safely instead of producing an empty prefix.
 A per-repo [`commit.branch_pattern`](/no-mistakes/reference/repo-config/#commitbranch_pattern) value overrides this global setting.
+
+### commit.branch_replacement
+
+Optional global-only expression that adds literal text around the branch pattern's capture group before exposing it as `{{.Branch}}`.
+
+| | |
+| --- | --- |
+| Type | `string` replacement expression |
+| Default | Unset, so the capture group is used unchanged |
+
+Use exactly one `${1}` reference to insert the capture group; other dollar syntax is rejected.
+The replacement must be configured with `commit.branch_pattern` in the same global configuration.
+It is limited to 1,024 bytes, must be valid UTF-8, and must exclude the same control and unsafe Unicode format characters as `commit.fix_message`.
+Malformed replacement syntax fails configuration loading with an actionable error.
+The expanded identifier is subject to the existing UTF-8, control-character, unsafe-Unicode, and rendered-subject validation.
+A repository `commit.branch_pattern` override disables this machine-local replacement so it cannot be applied to a different pattern.
 
 ### intent
 
