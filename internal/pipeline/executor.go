@@ -1033,6 +1033,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
 				phaseStart = time.Now()
 				sctx.Fixing = true
+				sctx.FinalizingAnswers = false
+				sctx.SkipFixExecution = false
 				sctx.PreviousFindings = fixableFindings
 				sctx.DeferredFindings = removeMatchingFindingsJSON(outcome.Findings, fixableFindings)
 				nextTrigger = "auto_fix"
@@ -1158,7 +1160,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
 			}
 			sctx.Fixing = true
+			// A genuine fix round always executes its fixer, even when the
+			// round before it was an answer replay that suppressed one.
 			sctx.FinalizingAnswers = false
+			sctx.SkipFixExecution = false
 			selectedFindings := filterFindingsJSON(outcome.Findings, response.findingIDs)
 			mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
 			sctx.PreviousFindings = mergedFindings
@@ -1187,12 +1192,24 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// it never reads as a human declining its findings. The step goes
 			// back to running and re-executes, which resumes the SAME reviewer
 			// session with the answers.
+			//
+			// Only the review step owns a question channel. Any other step
+			// receiving this action would re-execute with review semantics it
+			// does not implement, so it fails closed instead.
+			if stepName != types.StepReview {
+				return false, "", fmt.Errorf("step %s: %q is only a review response", stepName, types.ActionAnswer)
+			}
 			phaseStart = time.Now()
 			writeLog(fmt.Sprintf("answers received; resuming the review after round %d", roundNum))
 			if dbErr := markRunning(); dbErr != nil {
 				slog.Warn("failed to return step status to running", "step", stepName, "error", dbErr)
 			}
 			sctx.FinalizingAnswers = true
+			// A question can be asked by a rereview inside a fix round too.
+			// That round's fixes are already applied and committed, so the
+			// re-execution must replay its REVIEW turn only; running the fixer
+			// again would re-apply the same findings to already-fixed code.
+			sctx.SkipFixExecution = true
 			nextTrigger = "answer"
 			slog.Info("review answers received, re-executing", "step", stepName)
 			continue // loop back to step.Execute

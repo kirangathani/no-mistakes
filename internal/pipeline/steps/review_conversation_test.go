@@ -1,0 +1,569 @@
+package steps
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+func questionFindings(t *testing.T, findingsJSON string) []types.Finding {
+	t.Helper()
+	parsed, err := types.ParseFindingsJSON(findingsJSON)
+	if err != nil {
+		t.Fatalf("parse findings: %v", err)
+	}
+	var out []types.Finding
+	for _, f := range parsed.Items {
+		if f.Category == types.FindingCategoryReviewQuestion {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers proves the
+// whole point of emitting questions while the reviewer works: the reviewer
+// finishes the pass it CAN do, the question it could not settle lands in the
+// run's conversation file, and the step parks on it as an ask-user finding
+// rather than approving the head with an open question.
+func TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	var convDir string
+	ag := &mockAgent{}
+	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		// Stand in for the reviewer's own file tools: emit the question the
+		// moment it is substantiated, then carry on and return findings.
+		if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
+			ID:       "q1",
+			Question: "Should the legacy /v1 route keep answering?",
+			Options:  []string{"Keep answering", "Remove it"},
+			File:     "internal/api/router.go",
+			Line:     88,
+			Area:     "routing",
+		}); err != nil {
+			return nil, err
+		}
+		return &agent.Result{Output: []byte(
+			`{"findings":[{"id":"f-1","severity":"info","description":"PENDING ANSWER (q1): depends on the route decision","action":"no-op"}],"summary":"one open question","risk_level":"low","risk_rationale":"pending","risk_scope":"source-or-external"}`,
+		)}, nil
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	convDir = reviewConversationDir(sctx)
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	// The prompt must actually describe the channel, or the reviewer has no
+	// way to use it.
+	if !strings.Contains(lastReviewPrompt(t, ag), reviewqa.QuestionsFile) || !strings.Contains(lastReviewPrompt(t, ag), "KEEP REVIEWING while a question is open") {
+		t.Fatalf("review prompt is missing the question protocol:\n%s", lastReviewPrompt(t, ag))
+	}
+
+	conv, err := reviewqa.Load(convDir)
+	if err != nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+	if len(conv.Open()) != 1 || conv.Open()[0].ID != "q1" {
+		t.Fatalf("conversation = %+v, want one open question q1", conv)
+	}
+
+	questions := questionFindings(t, outcome.Findings)
+	if len(questions) != 1 {
+		t.Fatalf("findings = %s, want one review-question finding", outcome.Findings)
+	}
+	q := questions[0]
+	if q.Action != types.ActionAskUser {
+		t.Fatalf("question finding action = %q, want ask-user so the step parks", q.Action)
+	}
+	if q.Severity != types.FindingSeverityWarning {
+		t.Fatalf("question finding severity = %q, want warning: an open question is not a defect", q.Severity)
+	}
+	if q.File != "internal/api/router.go" || q.Line != 88 {
+		t.Fatalf("question finding lost its anchor: %+v", q)
+	}
+	if !strings.Contains(q.Description, "Keep answering | Remove it") {
+		t.Fatalf("question finding lost its options: %q", q.Description)
+	}
+	if id, ok := ReviewQuestionID(q.ID); !ok || id != "q1" {
+		t.Fatalf("finding id %q does not carry the question id", q.ID)
+	}
+	// An open question must NOT read as auto-fixable work: there is nothing
+	// for a fixer to do, and the answer is the only thing that resolves it.
+	if !types.HasAskUserFindings(mustParseFindings(t, outcome.Findings)) {
+		t.Fatalf("open question did not produce an ask-user gate: %s", outcome.Findings)
+	}
+}
+
+// TestReviewStep_RetractedQuestionDoesNotPark covers the reviewer settling a
+// question itself after asking it. A withdrawal must cost nothing: no park, no
+// finding, no answer required.
+func TestReviewStep_RetractedQuestionDoesNotPark(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	var convDir string
+	ag := &mockAgent{}
+	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
+			ID: "q1", Question: "does the migration cover this?", Options: []string{"yes", "no"},
+		}); err != nil {
+			return nil, err
+		}
+		if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
+			ID: "q1", Kind: reviewqa.KindRetract, Reason: "the migration note answers it",
+		}); err != nil {
+			return nil, err
+		}
+		return &agent.Result{Output: []byte(cleanReviewJSON)}, nil
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	convDir = reviewConversationDir(sctx)
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got := questionFindings(t, outcome.Findings); len(got) != 0 {
+		t.Fatalf("withdrawn question still parked the step: %+v", got)
+	}
+	if outcome.NeedsApproval {
+		t.Fatal("withdrawn question must not need approval")
+	}
+}
+
+// TestReviewStep_AnswersResumeTheSameSessionAndFinalize is the conversational
+// half of the contract: the answer reaches the SAME reviewer session, which
+// finishes the pass it paused instead of re-reading the diff from scratch, and
+// the answer is durably recorded for the next cold reviewer.
+func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
+	turn := 0
+	mock := &sessionMockAgent{}
+	var convDir string
+	mock.respond = func(opts agent.RunOpts) *agent.Result {
+		if opts.Purpose != "review" {
+			t.Errorf("unexpected agent purpose %q", opts.Purpose)
+			return &agent.Result{Output: []byte(`{}`)}
+		}
+		turn++
+		if turn == 1 {
+			if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
+				ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
+			}); err != nil {
+				t.Errorf("append question: %v", err)
+			}
+			return &agent.Result{Output: []byte(cleanReviewJSON)}
+		}
+		return &agent.Result{Output: []byte(cleanReviewJSON)}
+	}
+
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	convDir = exec.ReviewConversationDir(run.ID)
+
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForReviewStatus(t, database, run.ID, types.StepStatusAwaitingApproval)
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain"}); err != nil {
+		t.Fatalf("append answer: %v", err)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		t.Fatalf("respond with answers: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("executor timed out")
+	}
+
+	reviews := reviewCalls(mock.snapshot())
+	if len(reviews) != 2 {
+		t.Fatalf("expected an asking turn and a finalize turn, got %d", len(reviews))
+	}
+	if reviews[0].Session == nil || reviews[0].Session.ID != "" {
+		t.Fatalf("the asking turn must START a reviewer session, got %+v", reviews[0].Session)
+	}
+	if reviews[1].Session == nil || reviews[1].Session.ID != "sess-1" {
+		t.Fatalf("the finalize turn must RESUME the asking session, got %+v", reviews[1].Session)
+	}
+	if !strings.Contains(reviews[1].Prompt, `answer="keep"`) || !strings.Contains(reviews[1].Prompt, "answered_by=captain") {
+		t.Fatalf("finalize prompt is missing the answer:\n%s", reviews[1].Prompt)
+	}
+	if !strings.Contains(reviews[1].Prompt, "settles ONLY the question it answers") {
+		t.Fatalf("finalize prompt lost the scope-of-an-answer instruction:\n%s", reviews[1].Prompt)
+	}
+	// A resume must not turn the finalize turn into a bare message: the prompt
+	// has to stand on its own so a failed resume degrades to a cold review
+	// rather than a meaningless one.
+	if !strings.Contains(reviews[1].Prompt, "Do a full review pass before returning") {
+		t.Fatalf("finalize prompt is not self-sufficient:\n%s", reviews[1].Prompt)
+	}
+
+	// The answer is persisted where the next COLD reviewer reads it.
+	answers, _, err := database.GetBranchReviewAnswers(repo.ID, run.Branch, 0)
+	if err != nil {
+		t.Fatalf("read branch answers: %v", err)
+	}
+	if len(answers) != 1 || answers[0].Answer != "keep" || answers[0].AnsweredBy != "captain" {
+		t.Fatalf("branch answers = %#v", answers)
+	}
+
+	// The answer round is not a fix round: no code changed, so nothing may
+	// count it as one.
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatalf("get rounds: %v", err)
+	}
+	if len(rounds) != 2 {
+		t.Fatalf("expected 2 rounds, got %d", len(rounds))
+	}
+	if rounds[1].Trigger != "answer" || rounds[1].IsFixRound() {
+		t.Fatalf("answer round = %q (fix=%v), want trigger answer and not a fix round", rounds[1].Trigger, rounds[1].IsFixRound())
+	}
+	if rounds[0].SelectionSource != nil {
+		t.Fatalf("answering must not record a human selection on the asking round, got %q", *rounds[0].SelectionSource)
+	}
+}
+
+// TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout pins the
+// property that makes waiting-on-answers safe: the agent turn ENDS before the
+// step parks, so the finalize turn is a fresh invocation with a fresh
+// review_agent_timeout. A park longer than the whole budget must not expire
+// the review.
+func TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var deadlines []time.Time
+	var convDir string
+	turn := 0
+	ag := &deadlineRecordingAgent{onRun: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		if deadline, ok := ctx.Deadline(); ok {
+			deadlines = append(deadlines, deadline)
+		} else {
+			t.Error("review invocation ran without a deadline")
+		}
+		turn++
+		if turn == 1 {
+			if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
+				ID: "q1", Question: "keep it?", Options: []string{"keep", "drop"},
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return &agent.Result{Output: []byte(cleanReviewJSON)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.ReviewAgentTimeout = 30 * time.Minute
+	convDir = reviewConversationDir(sctx)
+
+	step := &ReviewStep{now: func() time.Time { return clock }}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("asking turn: %v", err)
+	}
+	if len(questionFindings(t, outcome.Findings)) != 1 {
+		t.Fatalf("asking turn did not park on its question: %s", outcome.Findings)
+	}
+
+	// A 90-minute park - three times the whole review budget.
+	clock = clock.Add(90 * time.Minute)
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep"}); err != nil {
+		t.Fatalf("append answer: %v", err)
+	}
+	sctx.FinalizingAnswers = true
+	outcome, err = step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("finalize turn: %v", err)
+	}
+	if got := questionFindings(t, outcome.Findings); len(got) != 0 {
+		t.Fatalf("finalized review still carries an open question: %+v", got)
+	}
+
+	if len(deadlines) != 2 {
+		t.Fatalf("expected 2 review invocations, got %d", len(deadlines))
+	}
+	// Each turn owns a full budget measured from its own start, so the gap
+	// between the two deadlines is the park, not a shrinking allowance.
+	if got := deadlines[1].Sub(deadlines[0]); got != 90*time.Minute {
+		t.Fatalf("finalize deadline moved by %s, want the full 90m park (the park must not be spent)", got)
+	}
+	if got := deadlines[1].Sub(clock); got != 30*time.Minute {
+		t.Fatalf("finalize turn got %s of review budget, want the full 30m", got)
+	}
+}
+
+// TestReviewStep_SettledQuestionReachesTheNextColdReviewer covers item 4: a
+// mid-turn answer is not a gate response, so it has to be persisted somewhere
+// the next COLD reviewer reads - including a reviewer in a later run, which is
+// what an author's fix push produces.
+func TestReviewStep_SettledQuestionReachesTheNextColdReviewer(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := newStaticReviewAgent(cleanReviewJSON)
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	earlier, err := sctx.DB.InsertRun(sctx.Repo.ID, sctx.Run.Branch, "older-head", baseSHA)
+	if err != nil {
+		t.Fatalf("insert earlier run: %v", err)
+	}
+	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
+		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: earlier.ID,
+		Question: "Should seed bytes be computed in the browser?",
+		Answer:   "Yes, keep it in the browser", AnsweredBy: "captain",
+	}); err != nil {
+		t.Fatalf("record answer: %v", err)
+	}
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(lastReviewPrompt(t, ag), "Settled questions on this branch (do not re-raise):") {
+		t.Fatalf("cold reviewer prompt has no settled-questions section:\n%s", lastReviewPrompt(t, ag))
+	}
+	if !strings.Contains(lastReviewPrompt(t, ag), `answer="Yes, keep it in the browser"`) {
+		t.Fatalf("settled section lost the answer:\n%s", lastReviewPrompt(t, ag))
+	}
+	// Separated from acceptance criteria on purpose: a settled question must
+	// not read as a requirement the change has to satisfy.
+	if !strings.Contains(lastReviewPrompt(t, ag), "These are settled decisions, not acceptance criteria") {
+		t.Fatalf("settled section is not distinguished from acceptance criteria:\n%s", lastReviewPrompt(t, ag))
+	}
+}
+
+// TestReviewStep_SupersedeCarriesThePreviousRunsReviewRounds covers item 7.
+// With the change author applying review fixes, the fix arrives as a push that
+// supersedes the parked run, so the new run's review step starts with no round
+// history at all - the previous run's findings and fix summaries have to travel
+// explicitly or the cold reviewer cannot tell a conversation ever happened.
+func TestReviewStep_SupersedeCarriesThePreviousRunsReviewRounds(t *testing.T) {
+	mock := &sessionMockAgent{}
+	mock.respond = func(agent.RunOpts) *agent.Result {
+		return &agent.Result{Output: []byte(cleanReviewJSON)}
+	}
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+
+	// The run the author's push superseded: its review found something, and a
+	// human declined to have the pipeline fix it.
+	superseded, err := database.InsertRun(repo.ID, run.Branch, "superseded-head", run.BaseSHA)
+	if err != nil {
+		t.Fatalf("insert superseded run: %v", err)
+	}
+	sr, err := database.InsertStepResult(superseded.ID, types.StepReview)
+	if err != nil {
+		t.Fatalf("insert step result: %v", err)
+	}
+	findings := `{"findings":[{"id":"f-9","severity":"error","description":"drops the straggler","action":"ask-user"}],"summary":"1 issue","risk_level":"high","risk_rationale":"bug","risk_scope":"source-or-external"}`
+	if _, err := database.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 0); err != nil {
+		t.Fatalf("insert round: %v", err)
+	}
+
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	reviews := reviewCalls(mock.snapshot())
+	if len(reviews) != 1 {
+		t.Fatalf("expected one review turn, got %d", len(reviews))
+	}
+	prompt := reviews[0].Prompt
+	if !strings.Contains(prompt, "Previous run's review rounds on this branch (superseded by a later push):") {
+		t.Fatalf("prompt lost the superseded run's rounds:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "drops the straggler") {
+		t.Fatalf("superseded section lost the prior finding:\n%s", prompt)
+	}
+	// The author wrote the fix, not the pipeline's fixer, so the adversarial
+	// pipeline-authored framing must NOT be applied to it.
+	if strings.Contains(prompt, "Fix-round provenance:") {
+		t.Fatalf("author-fixed code was framed as pipeline-authored:\n%s", prompt)
+	}
+}
+
+// TestBuildReviewConversationSection covers item 9: the PR body records what
+// was asked, what was answered, and by whom.
+func TestBuildReviewConversationSection(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, newStaticReviewAgent(cleanReviewJSON), dir, baseSHA, headSHA, config.Commands{})
+
+	if got := buildReviewConversationSection(sctx); got != "" {
+		t.Fatalf("no conversation should render nothing, got %q", got)
+	}
+
+	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
+		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: sctx.Run.ID,
+		Question: "Should the legacy route keep answering?", Answer: "Keep it behind a flag", AnsweredBy: "captain",
+	}); err != nil {
+		t.Fatalf("record answer: %v", err)
+	}
+	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
+		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q2", RunID: sctx.Run.ID,
+		Question: "Is the widened scope intended?", Answer: "No, narrow it",
+	}); err != nil {
+		t.Fatalf("record answer: %v", err)
+	}
+	convDir := reviewConversationDir(sctx)
+	for _, q := range []reviewqa.Question{
+		{ID: "q3", Question: "does the migration cover this?", Options: []string{"yes", "no"}},
+		{ID: "q3", Kind: reviewqa.KindRetract, Reason: "the migration note answers it"},
+	} {
+		if err := reviewqa.AppendQuestion(convDir, q); err != nil {
+			t.Fatalf("append question: %v", err)
+		}
+	}
+
+	section := buildReviewConversationSection(sctx)
+	for _, want := range []string{
+		"### Review conversation",
+		"Should the legacy route keep answering?",
+		"**A** (captain)**:** Keep it behind a flag",
+		"**A** (unattributed)**:** No, narrow it",
+		"**Withdrawn by the reviewer:** the migration note answers it",
+	} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("section missing %q:\n%s", want, section)
+		}
+	}
+}
+
+func TestPublishedConversationTextFlattensAndBounds(t *testing.T) {
+	// A newline would break out of the markdown list item it belongs to.
+	if got := publishedConversationText("two\nlines"); got != "two lines" {
+		t.Fatalf("got %q, want the lines flattened", got)
+	}
+	long := strings.Repeat("x", maxPublishedConversationChars+50)
+	got := publishedConversationText(long)
+	if len(got) <= maxPublishedConversationChars || !strings.Contains(got, "truncated") {
+		t.Fatalf("overlong text was not bounded with disclosure: %q", got)
+	}
+}
+
+func mustParseFindings(t *testing.T, raw string) types.Findings {
+	t.Helper()
+	parsed, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		t.Fatalf("parse findings: %v", err)
+	}
+	return parsed
+}
+
+// deadlineRecordingAgent hands each invocation's context to the test so a
+// per-invocation deadline can be asserted.
+type deadlineRecordingAgent struct {
+	onRun func(context.Context, agent.RunOpts) (*agent.Result, error)
+}
+
+func (a *deadlineRecordingAgent) Name() string { return "deadline-recorder" }
+func (a *deadlineRecordingAgent) Close() error { return nil }
+func (a *deadlineRecordingAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	return a.onRun(ctx, opts)
+}
+
+// newStaticReviewAgent returns an agent that answers every review turn with
+// the same findings JSON and remembers the last prompt it was given.
+func newStaticReviewAgent(output string) *mockAgent {
+	m := &mockAgent{}
+	m.runFn = func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: []byte(output)}, nil
+	}
+	return m
+}
+
+// lastReviewPrompt is the prompt of the agent's most recent invocation.
+func lastReviewPrompt(t *testing.T, m *mockAgent) string {
+	t.Helper()
+	if len(m.calls) == 0 {
+		t.Fatal("agent was never invoked")
+	}
+	return m.calls[len(m.calls)-1].Prompt
+}
+
+// TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer covers the
+// sharp case of a question asked by a rereview INSIDE a fix round: that
+// round's fixes are already applied and committed, so replaying the round to
+// deliver the answer must replay its review turn only. Running the fixer again
+// would re-apply the same findings to already-fixed code.
+func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T) {
+	reviewTurn := 0
+	mock := &sessionMockAgent{}
+	var convDir string
+	mock.respond = func(opts agent.RunOpts) *agent.Result {
+		switch opts.Purpose {
+		case "review":
+			reviewTurn++
+			if reviewTurn == 1 {
+				return &agent.Result{Output: []byte(
+					`{"findings":[{"id":"f-1","severity":"error","description":"bug","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external"}`,
+				)}
+			}
+			if reviewTurn == 2 {
+				if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
+					ID: "q1", Question: "was the fix meant to change this behaviour?", Options: []string{"yes", "no"},
+				}); err != nil {
+					t.Errorf("append question: %v", err)
+				}
+			}
+			return &agent.Result{Output: []byte(cleanReviewJSON)}
+		case "review-fix":
+			return &agent.Result{Output: []byte(`{"summary":"fix the bug"}`)}
+		default:
+			t.Errorf("unexpected agent purpose %q", opts.Purpose)
+			return &agent.Result{Output: []byte(`{}`)}
+		}
+	}
+
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	convDir = exec.ReviewConversationDir(run.ID)
+
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForReviewStatus(t, database, run.ID, types.StepStatusFixReview)
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "yes"}); err != nil {
+		t.Fatalf("append answer: %v", err)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		t.Fatalf("respond with answers: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("executor timed out")
+	}
+
+	calls := mock.snapshot()
+	if got := len(fixCalls(calls)); got != 1 {
+		t.Fatalf("fixer ran %d times, want exactly 1: answering a question is not a new fix round", got)
+	}
+	reviews := reviewCalls(calls)
+	if len(reviews) != 3 {
+		t.Fatalf("expected 3 review turns (initial, post-fix rereview, finalize), got %d", len(reviews))
+	}
+	// The rereview and its finalize replay both judge pipeline-authored code,
+	// so both stay cold: a reviewer session must never span a code change.
+	for i := 1; i < 3; i++ {
+		if reviews[i].Session != nil {
+			t.Fatalf("review turn %d ran with session %+v, want cold across a fix round", i+1, reviews[i].Session)
+		}
+	}
+	if !strings.Contains(reviews[2].Prompt, `answer="yes"`) {
+		t.Fatalf("finalize replay is missing the answer:\n%s", reviews[2].Prompt)
+	}
+}

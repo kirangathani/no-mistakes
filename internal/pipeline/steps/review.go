@@ -210,7 +210,7 @@ Previous review findings to address:
 	// net-deleted-author-lines git-diff backstop for the removal-of-required
 	// class - a fixer round that net-deletes author-added lines parks
 	// regardless of intent source. Held pending a scope decision.
-	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction + reviewQuestionProtocolSection(convDir, loadReviewConversation(sctx, convDir))
 
 	// Path-scoped repository review guidance, taken from the trusted
 	// default-branch config copy (regardless of allow_repo_commands) so a pushed
@@ -320,7 +320,7 @@ Risk assessment (after listing all findings):
 - Set risk_level to "medium" if the change has room to improve but is safe to merge first with concerns addressed as follow-ups.
 - Set risk_level to "high" if the change should not be merged without explicit human approval - it is fundamental, risky, ambiguous, or has strong negative signals.
 - Provide a one-sentence risk_rationale explaining why you chose that risk level.
-- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s%s`,
+- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s`,
 		branch,
 		baseSHA,
 		sctx.Run.HeadSHA,
@@ -329,7 +329,6 @@ Risk assessment (after listing all findings):
 		ignorePatterns,
 		historySection,
 		pathInstructions,
-		reviewQuestionProtocolSection(convDir, loadReviewConversation(sctx, convDir)),
 	)
 
 	// A review PASS keeps one session; a review ROUND never inherits another
