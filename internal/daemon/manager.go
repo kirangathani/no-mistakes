@@ -1774,6 +1774,27 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	if dir == "" {
 		return nil, fmt.Errorf("run %s has no review conversation directory", runID)
 	}
+	// Snapshot what was OPEN before the append, because "nothing is open now"
+	// is not evidence that THIS answer closed anything. An answer for an id
+	// nobody asked is recorded as an orphan and leaves the open count at zero,
+	// as does a duplicate or corrected answer sent after the last question was
+	// already closed. Releasing on the count alone let either of those release
+	// a review gate that had parked on ordinary ask-user CODE findings: the
+	// step re-executed as a finalize turn, burned a review round, and the
+	// operator's pending verdict never happened - their next axi respond then
+	// failed with "no step awaiting approval". A read failure here is not
+	// fatal: the answer has not been written yet, and an unknown prior state
+	// simply means this answer cannot prove it closed a question.
+	wasOpen := false
+	if before, err := reviewqa.Load(dir); err == nil {
+		for _, e := range before.Open() {
+			if e.ID == questionID {
+				wasOpen = true
+				break
+			}
+		}
+	}
+
 	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{
 		ID:         questionID,
 		Answer:     answer,
@@ -1793,6 +1814,12 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	}
 	if len(open) > 0 {
 		result.Note = "recorded; the reviewer still has open questions"
+		return result, nil
+	}
+	if !wasOpen {
+		// Recorded durably and deliberately inert: the answer is on disk for
+		// any reviewer that later asks this id, and no gate is touched.
+		result.Note = "recorded; it answered no open question, so no review gate was released"
 		return result, nil
 	}
 	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {

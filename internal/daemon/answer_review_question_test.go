@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -213,5 +215,167 @@ func TestAnswerReviewQuestionRefusesWhenTheConversationIsOff(t *testing.T) {
 	// a later enabled run would read as settled.
 	if answers, readErr := os.ReadFile(filepath.Join(conversationDir(p, runID), reviewqa.AnswersFile)); readErr == nil {
 		t.Fatalf("a refused answer was written to disk: %s", answers)
+	}
+}
+
+// parkingReviewStep parks a review gate on one ordinary ask-user CODE finding -
+// no review question involved - which is the gate an orphan answer used to be
+// able to steal.
+type parkingReviewStep struct{ entered chan struct{} }
+
+func (s *parkingReviewStep) Name() types.StepName { return types.StepReview }
+
+func (s *parkingReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	return &pipeline.StepOutcome{
+		Findings: `{"findings":[{"id":"review-1","severity":"warning","description":"needs an operator decision","action":"ask-user"}],"summary":"one issue"}`,
+	}, nil
+}
+
+// liveParkedGateFixture stands up a REAL executor parked at a review gate, so
+// "was the gate released" is observable rather than inferred. answerFixture's
+// bare executor is never waiting, so exec.Respond fails there for every input
+// and could not tell a correct refusal from the bug.
+func liveParkedGateFixture(t *testing.T) (*RunManager, *paths.Paths, string, *pipeline.Executor) {
+	t.Helper()
+	p := paths.WithRoot(t.TempDir())
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	repo, err := database.InsertRepo(t.TempDir(), "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", "head-1", "base-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	step := &parkingReviewStep{entered: make(chan struct{}, 1)}
+	cfg := &config.Config{Review: config.Review{Conversation: true}}
+	exec := pipeline.NewExecutor(database, p, cfg, nil, []pipeline.Step{step}, nil)
+
+	m := NewRunManager(database, p, nil)
+	m.mu.Lock()
+	m.executors[run.ID] = exec
+	m.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, t.TempDir()) }()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("parked executor never finished")
+		}
+	})
+
+	select {
+	case <-step.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("review step never ran")
+	}
+	// Wait until the gate is genuinely registered as waiting, which is what
+	// makes a release observable. The probe names a DIFFERENT step on purpose:
+	// RespondWithOverrides checks e.waiting first and the step name second, and
+	// returns on a mismatch before clearing e.waiting, so this distinguishes
+	// "not waiting yet" from "waiting" without consuming the gate. A probe with
+	// the real step name would answer it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := exec.Respond(types.StepTest, types.ActionApprove, nil)
+		if err == nil {
+			t.Fatal("a probe naming another step must never be accepted")
+		}
+		if strings.Contains(err.Error(), "step mismatch") {
+			break
+		}
+		if !strings.Contains(err.Error(), "no step awaiting approval") {
+			t.Fatalf("unexpected probe error: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("review gate never registered as awaiting approval")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return m, p, run.ID, exec
+}
+
+// TestAnswerReviewQuestionOrphanAnswerLeavesAParkedGateAlone is the regression
+// for the release rule. The handler used to decide purely from
+// len(conv.Open()) == 0 after the append, so an answer for an id nobody asked -
+// a typo, or an id carried over from a previous run - was recorded as an orphan,
+// left the open count at zero, and still fired
+// exec.Respond(StepReview, ActionAnswer). When the gate was parked on ordinary
+// ask-user CODE findings that released it: the step re-executed as a finalize
+// turn, burned a review round, the operator's verdict never happened, and their
+// follow-up axi respond failed with "no step awaiting approval".
+//
+// TestAnswerReviewQuestionForAnUnknownQuestionDoesNotOpenOne cannot catch this,
+// because its fixture has no parked gate at all.
+func TestAnswerReviewQuestionOrphanAnswerLeavesAParkedGateAlone(t *testing.T) {
+	m, p, runID, exec := liveParkedGateFixture(t)
+
+	result, err := m.HandleAnswerReviewQuestion(runID, "q-typo", "keep", "captain")
+	if err != nil {
+		t.Fatalf("an orphan answer must still be recorded: %v", err)
+	}
+	if result.Resumed {
+		t.Fatal("an answer that closed no open question resumed the reviewer")
+	}
+	if result.Open != 0 {
+		t.Fatalf("open = %d, want 0", result.Open)
+	}
+
+	// Recorded durably all the same: the answer is on disk for any reviewer
+	// that later asks this id.
+	answers, readErr := os.ReadFile(filepath.Join(conversationDir(p, runID), reviewqa.AnswersFile))
+	if readErr != nil || !strings.Contains(string(answers), "q-typo") {
+		t.Fatalf("the orphan answer was not recorded: err=%v content=%q", readErr, answers)
+	}
+
+	// The property that matters: the operator's verdict is still possible.
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("the orphan answer stole the operator's verdict: %v", err)
+	}
+}
+
+// TestAnswerReviewQuestionDuplicateAnswerLeavesAParkedGateAlone covers the same
+// rule for the other way the open count reaches zero without this answer
+// closing anything: a correction or a resend arriving after the last question
+// was already answered.
+func TestAnswerReviewQuestionDuplicateAnswerLeavesAParkedGateAlone(t *testing.T) {
+	m, p, runID, exec := liveParkedGateFixture(t)
+	dir := conversationDir(p, runID)
+
+	if err := reviewqa.AppendQuestion(dir, reviewqa.Question{
+		ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
+	}); err != nil {
+		t.Fatalf("seed question: %v", err)
+	}
+	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{ID: "q1", Answer: "keep"}); err != nil {
+		t.Fatalf("seed answer: %v", err)
+	}
+
+	// q1 is already closed, so this resend closes nothing.
+	result, err := m.HandleAnswerReviewQuestion(runID, "q1", "keep, behind a flag", "captain")
+	if err != nil {
+		t.Fatalf("a corrected answer must still be recorded: %v", err)
+	}
+	if result.Resumed {
+		t.Fatal("a duplicate answer resumed the reviewer")
+	}
+	answers, readErr := os.ReadFile(filepath.Join(dir, reviewqa.AnswersFile))
+	if readErr != nil || !strings.Contains(string(answers), "behind a flag") {
+		t.Fatalf("the corrected answer was not recorded: err=%v content=%q", readErr, answers)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("the duplicate answer stole the operator's verdict: %v", err)
 	}
 }
