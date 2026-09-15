@@ -88,9 +88,9 @@ type StepContext struct {
 	// already carries the same run's rounds.
 	PreviousRunID           string
 	PreviousRunReviewRounds []*db.StepRound
-	// Sessions manages the run's durable review-fixer session. The session
-	// machinery remains role-generic for legacy recovery; nil runs every
-	// invocation cold.
+	// Sessions manages the run's durable review-loop sessions: the fixer's,
+	// which spans its fix turns, and the reviewer's, which spans one review
+	// pass and is dropped before any fix round. Nil runs every invocation cold.
 	Sessions *RunSessions
 	// Shared carries in-memory run-scoped results one step hands to a later
 	// step in the same run (e.g. the combined document+lint pass).
@@ -111,10 +111,11 @@ type StepContext struct {
 
 // RunAgentSession executes one turn of a durable review-loop role session,
 // running cold when sessions are unavailable. The invocation is bounded by
-// RunAgent's deadline. Only the review step's fixer turns use this; every
-// other agent invocation - including every review turn, which must stay
-// independent of the session that prescribed the fixes under review - goes
-// through RunAgent and stays session-isolated.
+// RunAgent's deadline. Only the review step uses it: its fixer turns, and the
+// asking/finalize pair of one review pass. A review turn that judges changed
+// code - every post-fix rereview - passes an empty role so it stays isolated
+// from the session that prescribed the fixes under review. Every other agent
+// invocation goes through RunAgent.
 func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (*agent.Result, error) {
 	return sctx.runAgent(sctx.Ctx, opts, role)
 }
