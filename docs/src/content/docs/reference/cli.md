@@ -240,6 +240,8 @@ The same successful-output reporting instructions apply to `axi respond` results
 
 Answer one question the run's reviewer asked while it was reviewing. See [The Review Conversation](/no-mistakes/concepts/review-conversation/) for the protocol and state machine.
 
+Requires trusted [`review.conversation: true`](/no-mistakes/reference/repo-config/#reviewconversation), which is off by default. Without it the reviewer was never told to ask, so this command refuses and names the setting.
+
 ```sh
 no-mistakes axi answer --question q1 --answer "Keep it behind a flag" --by captain
 ```

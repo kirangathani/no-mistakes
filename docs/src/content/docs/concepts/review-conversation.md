@@ -9,8 +9,17 @@ every finding at the end, and any finding it could not decide became an
 answer then arrived as a gate response - approve, fix, or skip - which is a
 verdict on the whole round, not an answer to the question that was asked.
 
-The review conversation replaces the monologue with a two-way channel that runs
-*while* the review runs:
+The review conversation is **opt-in and off by default**. A repository asks for
+it with trusted
+[`review.conversation: true`](/no-mistakes/reference/repo-config/#reviewconversation)
+on its default branch; without that, everything on this page is inert and the
+review step behaves exactly as the paragraph above describes. The setting is
+read only from the trusted default-branch copy, in both directions: a pushed
+branch cannot make its own review park for a human answer, and it cannot
+decline a conversation the maintainer asked for.
+
+With it on, the review conversation replaces the monologue with a two-way
+channel that runs *while* the review runs:
 
 - the reviewer emits each substantiated question the moment it has one, instead
   of holding it to the end of the turn;
