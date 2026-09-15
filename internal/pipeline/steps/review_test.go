@@ -1359,7 +1359,11 @@ func reviewPromptFor(t *testing.T, rules []config.PathInstruction) string {
 	if len(ag.calls) != 1 {
 		t.Fatalf("expected 1 review call, got %d", len(ag.calls))
 	}
-	return strings.ReplaceAll(ag.calls[0].Prompt, dir, "<WORKDIR>")
+	// The run's evidence directory (where the review conversation lives) is a
+	// per-test temp path, so it is normalized like the worktree is: these
+	// assertions compare whole prompts across separate harness runs.
+	prompt := strings.ReplaceAll(ag.calls[0].Prompt, dir, "<WORKDIR>")
+	return strings.ReplaceAll(prompt, sctx.EvidenceDir, "<EVIDENCE>")
 }
 
 // A repository with no review.path_instructions must get the review prompt it

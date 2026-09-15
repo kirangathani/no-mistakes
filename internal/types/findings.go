@@ -103,6 +103,14 @@ const (
 	FindingCategoryCIReviewBot     = "ci-review-bot"
 )
 
+// FindingCategoryReviewQuestion marks the synthetic finding the review step
+// emits for each question its reviewer asked and nobody has answered yet. It
+// is always an ask-user warning, which is what parks the step in
+// waiting-on-answers; the ID is derived from the question id so the same
+// question keeps the same finding across rounds. See
+// docs/src/content/docs/concepts/review-conversation.md.
+const FindingCategoryReviewQuestion = "review-question"
+
 // FindingCategoryTestCommand marks the deterministic finding produced when a
 // configured commands.test exits non-zero. The Test step's
 // ApprovalOverrideVerifier keys on it so an approval over that failure is

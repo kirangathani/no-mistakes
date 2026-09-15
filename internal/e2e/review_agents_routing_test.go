@@ -197,15 +197,19 @@ func TestReviewAgentsRouteIndependentProfilesOnRealBinary(t *testing.T) {
 	assertModelArg(t, "non-review step", defaultTurn.Args, defaultModel)
 	assertNotModelArg(t, "non-review step", defaultTurn.Args, reviewerModel, fixerModel)
 
-	// The initial review and the post-fix rereview must be session-free: a fresh
-	// review must never resume a prior turn's session (claude spells resume as
-	// "--resume <id>").
+	// Neither the initial review nor the post-fix rereview may RESUME a prior
+	// turn's session (claude spells resume as "--resume <id>"). The initial
+	// review may start one - it is the asking turn of a review pass, and the
+	// finalize turn that answers its own questions resumes it - but it must
+	// never inherit another round's, and the rereview that certifies a fix
+	// round must be cold, or the session that prescribed those fixes would be
+	// certifying them.
 	assertNoResume(t, "initial review", initialReview.Args)
 	assertNoResume(t, "post-fix rereview", rereview.Args)
 }
 
 // assertNoResume fails if args carries a session-resume flag, proving the turn
-// ran session-free.
+// did not inherit an earlier round's session.
 func assertNoResume(t *testing.T, role string, args []string) {
 	t.Helper()
 	for _, arg := range args {
