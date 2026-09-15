@@ -34,6 +34,10 @@ export default defineConfig({
               label: "The Review Conversation",
               slug: "concepts/review-conversation",
             },
+            {
+              label: "Review Handoff Reports",
+              slug: "concepts/review-handoff-reports",
+            },
             { label: "Daemon & Worktrees", slug: "concepts/daemon" },
           ],
         },
