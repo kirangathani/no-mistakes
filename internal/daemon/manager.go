@@ -1764,6 +1764,12 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	if !ok {
 		return nil, fmt.Errorf("no active executor for run %s", runID)
 	}
+	// A repository that has not turned the conversation on has no channel to
+	// answer into, and the reviewer was never told to ask, so say which setting
+	// would accept an answer rather than report a missing directory.
+	if !exec.ReviewConversationEnabled() {
+		return nil, fmt.Errorf("run %s has no review conversation: set review.conversation: true in .no-mistakes.yaml on the default branch to let the reviewer ask questions", runID)
+	}
 	dir := exec.ReviewConversationDir(runID)
 	if dir == "" {
 		return nil, fmt.Errorf("run %s has no review conversation directory", runID)

@@ -38,6 +38,13 @@ const (
 // it, and that is exactly the case a reader of the PR needs to see. It is
 // listed as unanswered rather than quietly omitted.
 func buildReviewConversationSection(sctx *pipeline.StepContext) string {
+	// Keyed on the setting, not on this run's evidence directory: a repository
+	// that turned the conversation off must publish the body it published
+	// before the feature existed, even where an earlier run left answers in the
+	// branch store.
+	if !reviewConversationEnabled(sctx) {
+		return ""
+	}
 	answered := publishedRunAnswers(sctx)
 	conv := publishedRunConversation(sctx)
 	withdrawn := conv.Withdrawn()

@@ -1855,14 +1855,26 @@ func selectedFindingCount(raw string, ids []string) int {
 	return findingsCount(raw)
 }
 
-// ReviewConversationDir is where a run's review conversation files live.
+// ReviewConversationDir is where a run's review conversation files live, or
+// empty when this run has no conversation at all.
 //
 // The executor is the single owner of that answer, for the same reason it owns
 // runEvidenceDir: the path depends on the run's EFFECTIVE config
-// (test.evidence.local_root), which only the executor holds. Callers outside
-// the pipeline - the daemon's answer handler - ask here rather than
-// re-deriving it from global config and drifting from where the reviewer was
-// actually told to write.
+// (review.conversation and test.evidence.local_root), which only the executor
+// holds. Callers outside the pipeline - the daemon's answer handler - ask here
+// rather than re-deriving it from global config and drifting from where the
+// reviewer was actually told to write, or from whether it was told at all.
 func (e *Executor) ReviewConversationDir(runID string) string {
+	if !e.ReviewConversationEnabled() {
+		return ""
+	}
 	return reviewqa.Dir(e.runEvidenceDir(runID))
+}
+
+// ReviewConversationEnabled reports whether this run's effective config turns
+// the review conversation on. The daemon's answer handler asks so it can
+// refuse an answer by naming the setting that would accept one, rather than
+// reporting a missing directory.
+func (e *Executor) ReviewConversationEnabled() bool {
+	return e.config != nil && e.config.Review.Conversation
 }

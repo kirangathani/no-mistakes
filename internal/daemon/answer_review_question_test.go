@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +19,11 @@ import (
 // review conversation lives, because that path depends on effective config.
 func answerFixture(t *testing.T) (*RunManager, *paths.Paths, string) {
 	t.Helper()
+	return answerFixtureWithConversation(t, true)
+}
+
+func answerFixtureWithConversation(t *testing.T, conversation bool) (*RunManager, *paths.Paths, string) {
+	t.Helper()
 	p := paths.WithRoot(t.TempDir())
 	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {
@@ -27,7 +33,8 @@ func answerFixture(t *testing.T) (*RunManager, *paths.Paths, string) {
 
 	m := NewRunManager(database, p, nil)
 	const runID = "run-answer-1"
-	exec := pipeline.NewExecutor(database, p, &config.Config{}, nil, nil, nil)
+	cfg := &config.Config{Review: config.Review{Conversation: conversation}}
+	exec := pipeline.NewExecutor(database, p, cfg, nil, nil, nil)
 	m.mu.Lock()
 	m.executors[runID] = exec
 	m.mu.Unlock()
@@ -174,5 +181,37 @@ func TestAnswerReviewQuestionForAnUnknownQuestionDoesNotOpenOne(t *testing.T) {
 func TestAnswerActionIsReviewScoped(t *testing.T) {
 	if types.ActionAnswer == types.ActionApprove || types.ActionAnswer == types.ActionFix {
 		t.Fatal("the answer action must be distinct from a gate verdict")
+	}
+}
+
+// TestAnswerReviewQuestionRefusesWhenTheConversationIsOff is the opt-in half of
+// the answer channel. A repository that has not set review.conversation has no
+// reviewer that was ever told to ask, so an answer has nothing to settle and
+// nothing to release - and the refusal has to name the setting that would
+// accept one, or an operator reading "no review conversation directory" would
+// go looking for a missing directory instead of an unset key.
+func TestAnswerReviewQuestionRefusesWhenTheConversationIsOff(t *testing.T) {
+	m, p, runID := answerFixtureWithConversation(t, false)
+
+	// Seeded exactly as the enabled path would seed it, so the refusal is the
+	// setting's doing rather than an empty channel's.
+	if err := reviewqa.AppendQuestion(conversationDir(p, runID), reviewqa.Question{
+		ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
+	}); err != nil {
+		t.Fatalf("seed question: %v", err)
+	}
+
+	result, err := m.HandleAnswerReviewQuestion(runID, "q1", "keep", "captain")
+	if err == nil {
+		t.Fatalf("answering with the conversation off must fail, got %+v", result)
+	}
+	if !strings.Contains(err.Error(), "review.conversation") {
+		t.Fatalf("refusal does not name the setting that would accept an answer: %v", err)
+	}
+
+	// Nothing recorded: a refused answer must not leave a half-written channel
+	// a later enabled run would read as settled.
+	if answers, readErr := os.ReadFile(filepath.Join(conversationDir(p, runID), reviewqa.AnswersFile)); readErr == nil {
+		t.Fatalf("a refused answer was written to disk: %s", answers)
 	}
 }

@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,19 @@ func questionFindings(t *testing.T, findingsJSON string) []types.Finding {
 		}
 	}
 	return out
+}
+
+// enableReviewConversation turns review.conversation on. Every test below has
+// to call it, which is itself part of the contract: the setting is off by
+// default, and TestReviewStep_ConversationOffIsTodaysReview proves what a run
+// that never calls it gets.
+func enableReviewConversation(cfg *config.Config) {
+	cfg.Review.Conversation = true
+}
+
+func withReviewConversation(sctx *pipeline.StepContext) *pipeline.StepContext {
+	enableReviewConversation(sctx.Config)
+	return sctx
 }
 
 // TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers proves the
@@ -55,7 +69,7 @@ func TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers(t *testing.T) 
 			`{"findings":[{"id":"f-1","severity":"info","description":"PENDING ANSWER (q1): depends on the route decision","action":"no-op"}],"summary":"one open question","risk_level":"low","risk_rationale":"pending","risk_scope":"source-or-external"}`,
 		)}, nil
 	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
 	convDir = reviewConversationDir(sctx)
 
 	outcome, err := (&ReviewStep{}).Execute(sctx)
@@ -124,7 +138,7 @@ func TestReviewStep_RetractedQuestionDoesNotPark(t *testing.T) {
 		}
 		return &agent.Result{Output: []byte(cleanReviewJSON)}, nil
 	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
 	convDir = reviewConversationDir(sctx)
 
 	outcome, err := (&ReviewStep{}).Execute(sctx)
@@ -164,7 +178,7 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 		return &agent.Result{Output: []byte(cleanReviewJSON)}
 	}
 
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}}, enableReviewConversation)
 	convDir = exec.ReviewConversationDir(run.ID)
 
 	done := make(chan error, 1)
@@ -271,7 +285,7 @@ func TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout(t *testin
 		}
 		return &agent.Result{Output: []byte(cleanReviewJSON)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
 	sctx.Config.ReviewAgentTimeout = 30 * time.Minute
 	convDir = reviewConversationDir(sctx)
 
@@ -318,7 +332,7 @@ func TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout(t *testin
 func TestReviewStep_SettledQuestionReachesTheNextColdReviewer(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := newStaticReviewAgent(cleanReviewJSON)
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
 
 	earlier, err := sctx.DB.InsertRun(sctx.Repo.ID, sctx.Run.Branch, "older-head", baseSHA)
 	if err != nil {
@@ -353,12 +367,31 @@ func TestReviewStep_SettledQuestionReachesTheNextColdReviewer(t *testing.T) {
 // supersedes the parked run, so the new run's review step starts with no round
 // history at all - the previous run's findings and fix summaries have to travel
 // explicitly or the cold reviewer cannot tell a conversation ever happened.
+//
+// The channel exists for the conversation, so it is off with it: the off case
+// is asserted here rather than left implied, because this section reaches the
+// review prompt without any question being asked and would otherwise be the
+// one part of the feature a repository gets without opting in.
 func TestReviewStep_SupersedeCarriesThePreviousRunsReviewRounds(t *testing.T) {
+	t.Run("conversation on", func(t *testing.T) {
+		assertSupersedeSection(t, true)
+	})
+	t.Run("conversation off", func(t *testing.T) {
+		assertSupersedeSection(t, false)
+	})
+}
+
+func assertSupersedeSection(t *testing.T, conversation bool) {
+	t.Helper()
 	mock := &sessionMockAgent{}
 	mock.respond = func(agent.RunOpts) *agent.Result {
 		return &agent.Result{Output: []byte(cleanReviewJSON)}
 	}
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	var tweaks []func(*config.Config)
+	if conversation {
+		tweaks = append(tweaks, enableReviewConversation)
+	}
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}}, tweaks...)
 
 	// The run the author's push superseded: its review found something, and a
 	// human declined to have the pipeline fix it.
@@ -384,7 +417,14 @@ func TestReviewStep_SupersedeCarriesThePreviousRunsReviewRounds(t *testing.T) {
 		t.Fatalf("expected one review turn, got %d", len(reviews))
 	}
 	prompt := reviews[0].Prompt
-	if !strings.Contains(prompt, "Previous run's review rounds on this branch (superseded by a later push):") {
+	const heading = "Previous run's review rounds on this branch (superseded by a later push):"
+	if !conversation {
+		if strings.Contains(prompt, heading) || strings.Contains(prompt, "drops the straggler") {
+			t.Fatalf("the superseded section reached a review prompt with the conversation off:\n%s", prompt)
+		}
+		return
+	}
+	if !strings.Contains(prompt, heading) {
 		t.Fatalf("prompt lost the superseded run's rounds:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "drops the straggler") {
@@ -401,7 +441,7 @@ func TestReviewStep_SupersedeCarriesThePreviousRunsReviewRounds(t *testing.T) {
 // was asked, what was answered, and by whom.
 func TestBuildReviewConversationSection(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	sctx := newTestContextWithDBRecords(t, newStaticReviewAgent(cleanReviewJSON), dir, baseSHA, headSHA, config.Commands{})
+	sctx := withReviewConversation(newTestContextWithDBRecords(t, newStaticReviewAgent(cleanReviewJSON), dir, baseSHA, headSHA, config.Commands{}))
 
 	if got := buildReviewConversationSection(sctx); got != "" {
 		t.Fatalf("no conversation should render nothing, got %q", got)
@@ -545,7 +585,7 @@ func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T)
 		}
 	}
 
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}}, enableReviewConversation)
 	convDir = exec.ReviewConversationDir(run.ID)
 
 	done := make(chan error, 1)
@@ -612,7 +652,7 @@ func TestReviewStep_OnlyAFinalizeTurnResumesTheReviewerSession(t *testing.T) {
 			mock.respond = func(agent.RunOpts) *agent.Result {
 				return &agent.Result{Output: []byte(cleanReviewJSON)}
 			}
-			sctx := newTestContextWithDBRecords(t, mock, dir, baseSHA, headSHA, config.Commands{})
+			sctx := withReviewConversation(newTestContextWithDBRecords(t, mock, dir, baseSHA, headSHA, config.Commands{}))
 			if err := sctx.DB.UpsertRunAgentSession(sctx.Run.ID, string(pipeline.SessionRoleReviewer), mock.Name(), "stale-sess"); err != nil {
 				t.Fatalf("seed reviewer session: %v", err)
 			}
@@ -643,5 +683,138 @@ func TestReviewStep_OnlyAFinalizeTurnResumesTheReviewerSession(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestReviewStep_ConversationOffIsTodaysReview is the opt-in contract: with
+// review.conversation unset - the default for every repository that has not
+// asked for the conversation - the review step must behave exactly as it did
+// before this feature existed.
+//
+// It is asserted as an equality against the same step run with the setting on,
+// not as a list of absent strings, so a future part of the protocol that
+// forgets its gate fails here rather than passing a substring check nobody
+// updated. The off prompt must be the on prompt with the protocol removed and
+// nothing else, and the off run must leave no conversation on disk, mint no
+// reviewer session, and produce no question findings.
+func TestReviewStep_ConversationOffIsTodaysReview(t *testing.T) {
+	run := func(t *testing.T, on bool) (*pipeline.StepContext, *mockAgent, *pipeline.StepOutcome) {
+		t.Helper()
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		ag := newStaticReviewAgent(cleanReviewJSON)
+		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+		if on {
+			enableReviewConversation(sctx.Config)
+		}
+		sctx.Sessions = pipeline.NewRunSessions(sctx.DB, sctx.Run.ID, ag, true)
+		outcome, err := (&ReviewStep{}).Execute(sctx)
+		if err != nil {
+			t.Fatalf("execute (conversation on=%v): %v", on, err)
+		}
+		// The worktree and evidence paths are per-subtest temp dirs, so they are
+		// normalized before the two prompts are compared.
+		for i := range ag.calls {
+			p := strings.ReplaceAll(ag.calls[i].Prompt, dir, "<WORKDIR>")
+			ag.calls[i].Prompt = strings.ReplaceAll(p, sctx.EvidenceDir, "<EVIDENCE>")
+		}
+		return sctx, ag, outcome
+	}
+
+	offSctx, offAgent, offOutcome := run(t, false)
+	_, onAgent, _ := run(t, true)
+
+	offPrompt := lastReviewPrompt(t, offAgent)
+	onPrompt := lastReviewPrompt(t, onAgent)
+	if offPrompt == onPrompt {
+		t.Fatal("the conversation changed nothing in the review prompt when on; the protocol section is not reaching the reviewer")
+	}
+	// Appends only: the on prompt is the off prompt plus the protocol section.
+	if !strings.HasPrefix(onPrompt, offPrompt) {
+		t.Fatalf("turning the conversation on rewrote the review prompt instead of appending to it.\noff:\n%s\n\non:\n%s", offPrompt, onPrompt)
+	}
+	for _, marker := range []string{reviewqa.QuestionsFile, reviewqa.AnswersFile, "Asking questions while you work", "KEEP REVIEWING while a question is open"} {
+		if strings.Contains(offPrompt, marker) {
+			t.Fatalf("the off review prompt carries %q:\n%s", marker, offPrompt)
+		}
+	}
+
+	// No channel on disk: the reviewer was never told to write one, and
+	// nothing else may create it on its behalf.
+	if dir := reviewConversationDir(offSctx); dir != "" {
+		t.Fatalf("conversation directory resolved to %q with the setting off", dir)
+	}
+	if entries, err := os.ReadDir(reviewqa.Dir(offSctx.EvidenceDir)); err == nil && len(entries) > 0 {
+		t.Fatalf("the off run left %d conversation file(s) behind", len(entries))
+	}
+
+	// No reviewer identity: every review turn stays session-free, which is the
+	// property the fix-round independence guarantee rests on.
+	if len(offAgent.calls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(offAgent.calls))
+	}
+	if offAgent.calls[0].Session != nil {
+		t.Fatalf("the off review turn was given a session: %+v", offAgent.calls[0].Session)
+	}
+	sessions, err := offSctx.DB.GetRunAgentSessions(offSctx.Run.ID)
+	if err != nil {
+		t.Fatalf("get sessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("the off run persisted %d role session(s): %+v", len(sessions), sessions)
+	}
+
+	// No question findings, and no PR conversation group.
+	if got := questionFindings(t, offOutcome.Findings); len(got) != 0 {
+		t.Fatalf("the off run produced %d review-question finding(s)", len(got))
+	}
+	if section := buildReviewConversationSection(offSctx); section != "" {
+		t.Fatalf("the off run published a review conversation section:\n%s", section)
+	}
+}
+
+// A conversation left on disk by a run made when the setting was on must not
+// reach a later run made with it off: the gate is the setting, not the absence
+// of files. Without this, turning the conversation back off would still park
+// the review on a stale question nobody can answer any more, because
+// `axi answer` refuses once the setting is off.
+func TestReviewStep_ConversationOffIgnoresQuestionsAlreadyOnDisk(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := newStaticReviewAgent(cleanReviewJSON)
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	// Written as the enabled path would write it, then the setting is off.
+	if err := reviewqa.AppendQuestion(reviewqa.Dir(sctx.EvidenceDir), reviewqa.Question{
+		ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
+	}); err != nil {
+		t.Fatalf("seed question: %v", err)
+	}
+	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
+		RepoID:     sctx.Repo.ID,
+		Branch:     sctx.Run.Branch,
+		QuestionID: "q0",
+		RunID:      sctx.Run.ID,
+		Question:   "was the old route intentional?",
+		Answer:     "yes",
+		AnsweredBy: "captain",
+	}); err != nil {
+		t.Fatalf("seed settled answer: %v", err)
+	}
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got := questionFindings(t, outcome.Findings); len(got) != 0 {
+		t.Fatalf("a question on disk parked a review with the conversation off: %+v", got)
+	}
+	if outcome.NeedsApproval {
+		t.Fatal("a question on disk made the off review park for approval")
+	}
+	prompt := lastReviewPrompt(t, ag)
+	if strings.Contains(prompt, "Settled questions on this branch") {
+		t.Fatalf("the off review prompt carries the settled-questions section:\n%s", prompt)
+	}
+	if section := buildReviewConversationSection(sctx); section != "" {
+		t.Fatalf("the off run published a review conversation section:\n%s", section)
 	}
 }

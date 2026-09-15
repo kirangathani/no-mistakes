@@ -17,12 +17,27 @@ import (
 // recent answers.
 const maxSettledQuestionsInPrompt = db.MaxBranchReviewAnswers
 
-// reviewConversationDir is where this run's review conversation lives. Empty
-// when the run has no evidence directory, which disables the protocol
-// entirely: the reviewer is told nothing about it and behaves exactly as it
-// did before, one JSON at the end of the turn.
+// reviewConversationEnabled reports whether this repository asked for the
+// review conversation. It is the one owner of that question inside this
+// package: off, every part of the protocol is off together, which is what
+// makes "the key is off" mean today's behavior rather than most of it.
+func reviewConversationEnabled(sctx *pipeline.StepContext) bool {
+	return sctx != nil && sctx.Config != nil && sctx.Config.Review.Conversation
+}
+
+// reviewConversationDir is where this run's review conversation lives.
+//
+// Empty is the single off-switch for the whole protocol, and every consumer
+// keys on it: the reviewer is told nothing about a question channel, no files
+// are created, no question findings are produced, the review turn stays
+// session-free, and the PR body grows no conversation group - byte for byte
+// the behavior of a build without this feature.
+//
+// It is empty for two reasons. review.conversation is off, which is the
+// default and means the repository has not asked for the conversation; or the
+// run has no evidence directory, so there is nowhere to put the files.
 func reviewConversationDir(sctx *pipeline.StepContext) string {
-	if sctx == nil {
+	if !reviewConversationEnabled(sctx) {
 		return ""
 	}
 	return reviewqa.Dir(sctx.EvidenceDir)
@@ -163,6 +178,12 @@ func settledQuestionsPromptSection(sctx *pipeline.StepContext) string {
 
 func loadBranchReviewAnswers(sctx *pipeline.StepContext) ([]db.ReviewAnswer, bool) {
 	if sctx == nil || sctx.DB == nil || sctx.Repo == nil || sctx.Run == nil {
+		return nil, false
+	}
+	// Off, the section is not rendered at all rather than merely empty: a
+	// repository that turns the conversation back off must get the review
+	// prompt it had before, not one still carrying what a prior run settled.
+	if !reviewConversationEnabled(sctx) {
 		return nil, false
 	}
 	branch := strings.TrimSpace(sctx.Run.Branch)
