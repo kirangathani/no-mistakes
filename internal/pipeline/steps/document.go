@@ -81,20 +81,7 @@ var housekeepingFindingsSchema = json.RawMessage(`{
 				"required": ["severity", "description", "action", "category"]
 			}
 		},
-		"summary": {"type": "string"},
-		"applied_notes": {
-			"type": "array",
-			"description": "one entry per handoff note you received from the review step: whether you applied it, and if not, why not",
-			"items": {
-				"type": "object",
-				"properties": {
-					"id": {"type": "string", "description": "the note id as given"},
-					"applied": {"type": "boolean"},
-					"note": {"type": "string", "description": "what you changed, or why the note needed no change"}
-				},
-				"required": ["id", "applied"]
-			}
-		}
+		"summary": {"type": "string"}
 	},
 	"required": ["findings", "summary"]
 }`)
@@ -152,6 +139,14 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		schema = housekeepingFindingsSchema
 		purpose = "housekeeping"
 	}
+	// The outcome list is declared only when this pass received notes to
+	// report on; see withAppliedNotesSchema for why an unconditional
+	// declaration breaks agents that have nothing to say about it.
+	handedOver := len(docNotes)
+	if combinedLint {
+		handedOver += len(lintNotes)
+	}
+	schema = withAppliedNotesSchema(schema, handedOver)
 
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,

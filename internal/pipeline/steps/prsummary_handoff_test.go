@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -100,5 +101,44 @@ func TestNormalizeHandoffNotes_AssignsIDsAndDropsEmptyNotes(t *testing.T) {
 	}
 	if out[1].ID != "mine" {
 		t.Errorf("second note lost its own id: %q", out[1].ID)
+	}
+}
+
+// applied_notes must be declared ONLY when notes were handed over. The codex
+// adapter rewrites every declared property as required, so declaring it
+// unconditionally rejects an agent that has nothing to say about it - which is
+// exactly how a green e2e journey went red.
+func TestWithAppliedNotesSchema_DeclaredOnlyWhenNotesWereHandedOver(t *testing.T) {
+	t.Parallel()
+	if got := string(withAppliedNotesSchema(findingsSchema, 0)); strings.Contains(got, "applied_notes") {
+		t.Errorf("a step with no notes declared applied_notes:\n%s", got)
+	}
+	spliced := withAppliedNotesSchema(findingsSchema, 2)
+	if !strings.Contains(string(spliced), "applied_notes") {
+		t.Fatalf("a step with notes did not declare applied_notes:\n%s", spliced)
+	}
+	var doc struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if err := json.Unmarshal(spliced, &doc); err != nil {
+		t.Fatalf("spliced schema is not valid JSON: %v\n%s", err, spliced)
+	}
+	// The base schema's own properties and required list must survive.
+	for _, key := range []string{"findings", "summary"} {
+		if _, ok := doc.Properties[key]; !ok {
+			t.Errorf("splice dropped base property %q", key)
+		}
+	}
+	if len(doc.Required) != 2 {
+		t.Errorf("required = %v, want the base schema's own list", doc.Required)
+	}
+	// Not required: an agent that ignores the field still parses, and the
+	// notes are then recorded as unaddressed instead of failing a step that
+	// has already committed its edits.
+	for _, key := range doc.Required {
+		if key == "applied_notes" {
+			t.Error("applied_notes must not be required")
+		}
 	}
 }

@@ -216,3 +216,74 @@ func TestExtractCodexPromptRejectsArgvPrompt(t *testing.T) {
 		t.Fatal("expected argv prompt to be rejected")
 	}
 }
+
+// A canned payload that omits a newly declared OPTIONAL property must still
+// satisfy the codex-normalized schema: the adapter rewrites every declared
+// property as required, so the fake has to supply the null real codex would.
+// A missing REQUIRED property must still be missing, or a scenario written to
+// prove a rejection would silently stop proving it.
+func TestFilterStructuredToSchemaSuppliesNullForOmittedNullableFields(t *testing.T) {
+	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "schema.json")
+	// The shape codexOutputSchema produces: everything required, the
+	// originally-optional properties nullable.
+	schema := `{
+		"type": "object",
+		"additionalProperties": false,
+		"properties": {
+			"findings": {"type": "array"},
+			"summary": {"type": "string"},
+			"doc_report": {"type": ["array", "null"]},
+			"applied_notes": {"type": ["array", "null"]}
+		},
+		"required": ["findings", "summary", "doc_report", "applied_notes"]
+	}`
+	if err := os.WriteFile(schemaPath, []byte(schema), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+
+	filtered, err := filterStructuredToSchema(map[string]any{
+		"findings": []any{},
+		"summary":  "reviewed",
+		"verdict":  "go",
+	}, schemaPath)
+	if err != nil {
+		t.Fatalf("filter: %v", err)
+	}
+	for _, key := range []string{"doc_report", "applied_notes"} {
+		value, ok := filtered[key]
+		if !ok {
+			t.Errorf("%s was not supplied; a canned payload omitting a newly declared optional field fails codex validation", key)
+		}
+		if value != nil {
+			t.Errorf("%s = %v, want null", key, value)
+		}
+	}
+	if _, ok := filtered["verdict"]; ok {
+		t.Error("an undeclared field survived the filter")
+	}
+	if filtered["summary"] != "reviewed" {
+		t.Errorf("summary = %v, want the payload's own value", filtered["summary"])
+	}
+}
+
+func TestFilterStructuredToSchemaLeavesAMissingRequiredFieldMissing(t *testing.T) {
+	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "schema.json")
+	schema := `{
+		"type": "object",
+		"additionalProperties": false,
+		"properties": {"findings": {"type": "array"}, "summary": {"type": "string"}},
+		"required": ["findings", "summary"]
+	}`
+	if err := os.WriteFile(schemaPath, []byte(schema), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	filtered, err := filterStructuredToSchema(map[string]any{"findings": []any{}}, schemaPath)
+	if err != nil {
+		t.Fatalf("filter: %v", err)
+	}
+	if _, ok := filtered["summary"]; ok {
+		t.Error("a non-nullable required field was invented; a rejection scenario would stop rejecting")
+	}
+}

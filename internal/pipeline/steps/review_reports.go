@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -222,4 +223,60 @@ func reconcileHandoffOutcomes(sctx *pipeline.StepContext, notes []types.HandoffN
 		sctx.Log(fmt.Sprintf("handoff notes: %d of %d applied, %d unreported", applied, len(out), unaddressed))
 	}
 	return out
+}
+
+// appliedNotesSchema is the outcome list a consuming step returns for the
+// notes it received, as a schema property value.
+const appliedNotesSchema = `{
+	"type": "array",
+	"description": "one entry per handoff note you received from the review step: whether you applied it, and if not, why not",
+	"items": {
+		"type": "object",
+		"properties": {
+			"id": {"type": "string", "description": "the note id as given"},
+			"applied": {"type": "boolean"},
+			"note": {"type": "string", "description": "what you changed, or why the note needed no change"}
+		},
+		"required": ["id", "applied"]
+	}
+}`
+
+// withAppliedNotesSchema declares applied_notes on a consuming step's schema
+// ONLY when notes were actually handed over.
+//
+// Declaring it unconditionally is not free, and the reason is the codex
+// adapter: codexOutputSchema rewrites EVERY declared property as required
+// (addAdditionalPropertiesFalse replaces "required" with the full property
+// list), so a step that received no report - and any agent whose canned or
+// older output omits the field - is rejected for a field it has nothing to say
+// about. That is what turned a green e2e journey red.
+//
+// It is deliberately not added to "required" either: an agent that ignores the
+// field still parses, and reconcileHandoffOutcomes records those notes as
+// unaddressed, which is cheaper and more honest than failing a step that has
+// already committed its edits. A splice failure returns the base schema, so
+// the step degrades to its pre-report behavior rather than losing its schema.
+func withAppliedNotesSchema(base json.RawMessage, notes int) json.RawMessage {
+	if notes == 0 {
+		return base
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(base, &doc); err != nil {
+		return base
+	}
+	var properties map[string]json.RawMessage
+	if err := json.Unmarshal(doc["properties"], &properties); err != nil {
+		return base
+	}
+	properties["applied_notes"] = json.RawMessage(appliedNotesSchema)
+	encodedProperties, err := json.Marshal(properties)
+	if err != nil {
+		return base
+	}
+	doc["properties"] = encodedProperties
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return base
+	}
+	return encoded
 }

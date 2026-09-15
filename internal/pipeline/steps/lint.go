@@ -79,7 +79,7 @@ Previous lint findings to address:
 		result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 			Prompt:     fixerPrompt(prompt),
 			CWD:        sctx.WorkDir,
-			JSONSchema: findingsSchema,
+			JSONSchema: withAppliedNotesSchema(findingsSchema, len(lintNotes)),
 			OnChunk:    sctx.LogChunk,
 			Purpose:    "lint",
 		})
@@ -244,7 +244,7 @@ Rules:
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     fixerPrompt(prompt),
 		CWD:        sctx.WorkDir,
-		JSONSchema: findingsSchema,
+		JSONSchema: withAppliedNotesSchema(findingsSchema, len(lintNotes)),
 		OnChunk:    sctx.LogChunk,
 		Purpose:    "lint",
 	})
