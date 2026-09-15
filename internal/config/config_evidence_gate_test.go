@@ -33,6 +33,27 @@ func TestEffectiveRepoConfig_NonProductPathsTrustedOnly(t *testing.T) {
 	}
 }
 
+// TestEffectiveRepoConfig_NonProductPathsEmptyListSurvivesTheTrustBoundary:
+// the opt-out is the presence of the key with no entries, so it is carried by
+// the slice being non-nil and empty. EffectiveRepoConfig copies the trusted
+// list across the trust boundary before Merge resolves it, and a copy that
+// flattened that emptiness to nil would hand Merge "the repository configured
+// nothing" - restoring the built-in defaults and silently skipping the live
+// validation of exactly the paths the maintainer opted back into.
+func TestEffectiveRepoConfig_NonProductPathsEmptyListSurvivesTheTrustBoundary(t *testing.T) {
+	trusted, err := LoadRepoFromBytes([]byte("test:\n  evidence_gate: diff-class\n  non_product_paths: []\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, allowRepoCommands := range []bool{false, true} {
+		effective := EffectiveRepoConfig(&RepoConfig{}, trusted, allowRepoCommands)
+		resolved := Merge(&GlobalConfig{}, effective)
+		if len(resolved.Test.NonProductPaths) != 0 {
+			t.Fatalf("NonProductPaths = %v under allow_repo_commands=%v, want the explicit opt-out to stay empty", resolved.Test.NonProductPaths, allowRepoCommands)
+		}
+	}
+}
+
 func TestMerge_NonProductPathsDefaultWhenUnset(t *testing.T) {
 	got := Merge(&GlobalConfig{}, &RepoConfig{})
 	if !slices.Equal(got.Test.NonProductPaths, DefaultNonProductPaths) {

@@ -31,8 +31,10 @@ import (
 // bump's. When it is on, two conditions remove that cost without removing
 // evidence:
 //
-//  1. The run's diff (merge-base with the trusted default branch .. head, the
-//     same base the rebase step establishes) touches no product file. There is
+//  1. The run's diff (merge-base with the repository's default branch .. head,
+//     the same base the Review and Document steps read; a repository that sets
+//     pr.base_branch elsewhere gets a wider diff here, which only ever fails
+//     open to running the agent) touches no product file. There is
 //     then no live-drivable surface by construction, so the step records the
 //     existing no-surface verdict and marks it automatic. Unlike the agent's
 //     own no-surface it does not park: the classification is mechanical, so
@@ -136,7 +138,7 @@ func diffProductPaths(ctx context.Context, workDir string, nonProduct []string, 
 	return product, nil
 }
 
-// isNonProductPath reports whether every rule in patterns classifies file as
+// isNonProductPath reports whether ANY rule in patterns classifies file as
 // something the live-evidence agent cannot drive. An empty pattern list means
 // the repository opted every path back into being product code.
 func isNonProductPath(file string, patterns []string) bool {
@@ -169,14 +171,18 @@ func matchNonProductPattern(file, pattern string) bool {
 	return false
 }
 
-// reusableBranchVerdict returns a reuse decision when the most recent go
-// verdict recorded for this branch still covers this head's product files.
+// reusableBranchVerdict returns a reuse decision when this branch's NEWEST
+// recorded test verdict is a go that still covers this head's product files.
 //
-// Only that newest go verdict is considered. An older one necessarily spans a
-// wider diff, so if the newest does not cover this head no earlier one can.
+// Only that newest verdict is consulted, and it is never skipped past. An
+// older go necessarily spans a wider diff, so if the newest go does not cover
+// this head no earlier one can; and a newer no-go, inconclusive, or no-surface
+// entry is this branch's own latest evidence contradicting any earlier go, so
+// reusing behind it would publish a conclusion the branch has already moved
+// past.
 //
-// The rules are deliberately narrow. Only a go verdict is reusable: a no-go,
-// inconclusive, or no-surface conclusion is about a state a human has not
+// The rest of the rules are deliberately narrow for the same reason. Only a go
+// verdict is reusable: every other conclusion is about a state a human has not
 // resolved, and restating it would skip the decision rather than the cost.
 // Only the same branch is consulted, because a verdict is evidence about one
 // line of development. And the diff that proves nothing product-relevant moved
@@ -192,30 +198,30 @@ func reusableBranchVerdict(sctx *pipeline.StepContext, nonProduct []string) (tes
 		sctx.Log(fmt.Sprintf("could not read this branch's earlier test evidence (%v); running the live-evidence agent", err))
 		return testEvidenceDecision{}, false
 	}
-	for _, entry := range prior {
-		findings, parseErr := types.ParseFindingsJSON(entry.FindingsJSON)
-		if parseErr != nil || findings.Verdict != types.TestVerdictGo || findings.TestedHeadSHA == "" {
-			continue
-		}
-		if findings.TestedHeadSHA == sctx.Run.HeadSHA && !sctx.Fixing {
-			// Same head, nothing to diff.
-			return reuseDecision(sctx, entry.RunID, findings), true
-		}
-		rangeArg := findings.TestedHeadSHA + ".." + sctx.Run.HeadSHA
-		if sctx.Fixing {
-			rangeArg = findings.TestedHeadSHA
-		}
-		product, diffErr := diffProductPaths(sctx.Ctx, sctx.WorkDir, nonProduct, rangeArg)
-		if diffErr != nil {
-			sctx.Log(fmt.Sprintf("could not diff against the head run %s validated (%v); running the live-evidence agent", entry.RunID, diffErr))
-			return testEvidenceDecision{}, false
-		}
-		if len(product) > 0 {
-			return testEvidenceDecision{}, false
-		}
-		return reuseDecision(sctx, entry.RunID, findings), true
+	if prior == nil {
+		return testEvidenceDecision{}, false
 	}
-	return testEvidenceDecision{}, false
+	findings, parseErr := types.ParseFindingsJSON(prior.FindingsJSON)
+	if parseErr != nil || findings.Verdict != types.TestVerdictGo || findings.TestedHeadSHA == "" {
+		return testEvidenceDecision{}, false
+	}
+	if findings.TestedHeadSHA == sctx.Run.HeadSHA && !sctx.Fixing {
+		// Same head, nothing to diff.
+		return reuseDecision(sctx, prior.RunID, findings), true
+	}
+	rangeArg := findings.TestedHeadSHA + ".." + sctx.Run.HeadSHA
+	if sctx.Fixing {
+		rangeArg = findings.TestedHeadSHA
+	}
+	product, diffErr := diffProductPaths(sctx.Ctx, sctx.WorkDir, nonProduct, rangeArg)
+	if diffErr != nil {
+		sctx.Log(fmt.Sprintf("could not diff against the head run %s validated (%v); running the live-evidence agent", prior.RunID, diffErr))
+		return testEvidenceDecision{}, false
+	}
+	if len(product) > 0 {
+		return testEvidenceDecision{}, false
+	}
+	return reuseDecision(sctx, prior.RunID, findings), true
 }
 
 func reuseDecision(sctx *pipeline.StepContext, priorRunID string, prior Findings) testEvidenceDecision {
@@ -252,6 +258,10 @@ func priorRunEvidenceDir(sctx *pipeline.StepContext, priorRunID string) string {
 // findings, new test files a fix round wrote are still recorded, and the
 // recorded verdict still runs through verdictFindings so a future verdict that
 // must park still parks.
+//
+// newTestsFromFix is what the fix turn saw before commitAgentFixes ran, and it
+// cannot be recomputed here: detectNewTestFiles reads uncommitted status only,
+// so by this point the fixer's own files are committed and invisible to it.
 func gatedTestOutcome(
 	sctx *pipeline.StepContext,
 	gate testEvidenceDecision,
@@ -260,6 +270,7 @@ func gatedTestOutcome(
 	baselineSummary string,
 	baselineExitCode int,
 	fixSummary string,
+	newTestsFromFix []string,
 ) (*pipeline.StepOutcome, error) {
 	findings := gate.Reused
 	if gate.Source == types.TestEvidenceSourceNoProductChange {
@@ -273,7 +284,7 @@ func gatedTestOutcome(
 	findings.Summary = baselineSummary
 	findings.Items = append(append([]Finding(nil), baselineFindings...), verdictFindings(findings)...)
 
-	for _, f := range detectNewTestFiles(sctx.Ctx, sctx.WorkDir) {
+	for _, f := range mergeNewTestFiles(newTestsFromFix, detectNewTestFiles(sctx.Ctx, sctx.WorkDir)) {
 		findings.Items = append(findings.Items, Finding{
 			Severity:    types.FindingSeverityInfo,
 			Action:      types.ActionNoOp,

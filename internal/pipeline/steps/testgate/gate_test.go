@@ -128,6 +128,13 @@ func shortSHA(sha string) string {
 // later run may reuse.
 func recordPriorGoVerdict(t *testing.T, sctx *pipeline.StepContext, headSHA string) string {
 	t.Helper()
+	return recordPriorVerdict(t, sctx, headSHA, types.TestVerdictGo)
+}
+
+// recordPriorVerdict is recordPriorGoVerdict for any verdict, so a case can
+// shape what this branch's evidence history actually says.
+func recordPriorVerdict(t *testing.T, sctx *pipeline.StepContext, headSHA, verdict string) string {
+	t.Helper()
 	run, err := sctx.DB.InsertRun(sctx.Run.RepoID, sctx.Run.Branch, headSHA, sctx.Run.BaseSHA)
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +152,7 @@ func recordPriorGoVerdict(t *testing.T, sctx *pipeline.StepContext, headSHA stri
 			Live:     true,
 			Evidence: "checkout.png",
 		}},
-		Verdict:        types.TestVerdictGo,
+		Verdict:        verdict,
 		TestedHeadSHA:  headSHA,
 		EvidenceSource: types.TestEvidenceSourceAgent,
 	}
@@ -160,6 +167,37 @@ func recordPriorGoVerdict(t *testing.T, sctx *pipeline.StepContext, headSHA stri
 		t.Fatal(err)
 	}
 	return run.ID
+}
+
+// TestTestStep_NewerNonGoVerdictBlocksReuseOfAnOlderGo: reuse consults this
+// branch's NEWEST verdict only. A no-go recorded after a go is the branch's
+// own latest evidence contradicting it, so the older go must not be published
+// again even though no product file moved since it was earned.
+func TestTestStep_NewerNonGoVerdictBlocksReuseOfAnOlderGo(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := stepstest.SetupGitRepo(t)
+	validated := commitFiles(t, dir, "product change", map[string]string{
+		"internal/checkout/checkout.go": "package checkout\n",
+	})
+	head := commitFiles(t, dir, "docs follow-up", map[string]string{"docs/guide.md": "# guide\n"})
+	ag := gateAgent()
+	sctx := gateContext(t, ag, dir, baseSHA, head)
+
+	// Both are recorded at the head the go verdict validated, so the product
+	// diff to this head is empty and only the verdict ordering can block reuse.
+	recordPriorGoVerdict(t, sctx, validated)
+	recordPriorVerdict(t, sctx, validated, types.TestVerdictNoGo)
+
+	outcome, err := (&steps.TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.Calls) != 1 {
+		t.Fatalf("evidence agent invocations = %d, want 1 (a newer no-go supersedes the older go)", len(ag.Calls))
+	}
+	if got := parseOutcomeFindings(t, outcome).EvidenceSource; got != types.TestEvidenceSourceAgent {
+		t.Fatalf("evidence source = %q, want %q", got, types.TestEvidenceSourceAgent)
+	}
 }
 
 // TestTestStep_ProductChangeRunsTheEvidenceAgent is the control: a change that

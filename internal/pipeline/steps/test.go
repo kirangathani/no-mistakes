@@ -170,7 +170,7 @@ Previous test findings to address:
 	gate := resolveTestEvidenceGate(sctx, baseSHA, baselineExitCode != 0)
 	if gate.skipsAgent() {
 		sctx.Log("skipping the live-evidence agent: " + gate.Reason)
-		return gatedTestOutcome(sctx, gate, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary)
+		return gatedTestOutcome(sctx, gate, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary, newTestsFromFix)
 	}
 	if testCmd == "" {
 		sctx.Log("no test command configured, asking agent to run tests...")

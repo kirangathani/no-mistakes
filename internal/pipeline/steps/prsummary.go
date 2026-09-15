@@ -78,6 +78,14 @@ type pipelineAttestationLiveValidation struct {
 	Verdict string `json:"verdict"`
 	Live    int    `json:"live"`
 	Total   int    `json:"total"`
+	// Source names who produced the verdict: the live-evidence agent in this
+	// run, a reused earlier verdict, or the diff-class gate's automatic
+	// no-product-change conclusion. Omitted when the gate is off and for every
+	// run recorded before it existed, so those attestations stay byte-identical
+	// to a build without the gate. Under the gate, head equality alone no
+	// longer proves a freshly driven turn - a reused verdict is restamped with
+	// this head - so a consumer that needs that distinction reads this field.
+	Source string `json:"source,omitempty"`
 }
 
 type testingArtifactRenderState struct {
@@ -251,6 +259,7 @@ func attestedLiveValidation(steps []*db.StepResult, rounds map[string][]*db.Step
 				Verdict: findings.Verdict,
 				Live:    live,
 				Total:   total,
+				Source:  findings.EvidenceSource,
 			}
 		}
 		return nil
