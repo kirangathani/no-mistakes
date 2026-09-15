@@ -33,12 +33,16 @@ const (
 // (it settles nothing and needs no answer) - they are listed so a reader can
 // tell "the reviewer asked and then answered it itself" from "nobody asked".
 //
-// An unanswered question cannot appear here at all: the review step does not
-// complete while one is open, so a published PR body never has one.
+// An unanswered question can still appear, and must: the review step never
+// completes on its own while one is open, but a human may approve the gate over
+// it, and that is exactly the case a reader of the PR needs to see. It is
+// listed as unanswered rather than quietly omitted.
 func buildReviewConversationSection(sctx *pipeline.StepContext) string {
 	answered := publishedRunAnswers(sctx)
-	withdrawn := publishedWithdrawnQuestions(sctx)
-	if len(answered) == 0 && len(withdrawn) == 0 {
+	conv := publishedRunConversation(sctx)
+	withdrawn := conv.Withdrawn()
+	unanswered := conv.Open()
+	if len(answered) == 0 && len(withdrawn) == 0 && len(unanswered) == 0 {
 		return ""
 	}
 
@@ -58,6 +62,17 @@ func buildReviewConversationSection(sctx *pipeline.StepContext) string {
 			who = "unattributed"
 		}
 		fmt.Fprintf(&b, "  **A** (%s)**:** %s\n", who, publishedConversationText(a.Answer))
+	}
+	// Unanswered before withdrawn: a question someone approved past is the
+	// most consequential line in this section, so a length bound must not be
+	// what drops it.
+	for _, q := range unanswered {
+		if shown >= maxPublishedConversationEntries {
+			omitted++
+			continue
+		}
+		shown++
+		fmt.Fprintf(&b, "- **Q:** %s\n  **Unanswered:** the review gate was resolved with this question still open.\n", publishedConversationText(q.Question.Question))
 	}
 	for _, q := range withdrawn {
 		if shown >= maxPublishedConversationEntries {
@@ -98,16 +113,20 @@ func publishedRunAnswers(sctx *pipeline.StepContext) []db.ReviewAnswer {
 	return ordered
 }
 
-func publishedWithdrawnQuestions(sctx *pipeline.StepContext) []reviewqa.Entry {
+// publishedRunConversation reads this run's own conversation files, which is
+// where a withdrawal and an unanswered question live. Neither is persisted in
+// the branch store: a withdrawal settles nothing and needs no answer, and an
+// unanswered question has no answer to record.
+func publishedRunConversation(sctx *pipeline.StepContext) reviewqa.Conversation {
 	dir := reviewConversationDir(sctx)
 	if dir == "" {
-		return nil
+		return reviewqa.Conversation{}
 	}
 	conv, err := reviewqa.Load(dir)
 	if err != nil {
-		return nil
+		return reviewqa.Conversation{}
 	}
-	return conv.Withdrawn()
+	return conv
 }
 
 // publishedConversationText flattens and bounds one quoted line so a long

@@ -238,8 +238,13 @@ and must not become one.
 
 The PR body records the conversation alongside the existing decision and
 deferred lists: each question asked, its answer, and who answered it. A
-retracted question is listed as withdrawn. An unanswered question cannot reach
-the PR body, because the step cannot complete while one is open.
+retracted question is listed as withdrawn.
+
+A question can also be published as **unanswered**. The review step never
+completes on its own while one is open, but a human may approve the gate over
+it, and that is the case a reader of the PR most needs to see - so it is listed
+explicitly rather than quietly omitted, and it is listed before the withdrawn
+questions so a length bound cannot be what drops it.
 
 ## What is unchanged
 

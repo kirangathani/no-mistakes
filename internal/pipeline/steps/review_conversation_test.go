@@ -425,6 +425,15 @@ func TestBuildReviewConversationSection(t *testing.T) {
 		}
 	}
 
+	// A question a human approved the gate over: the review step never
+	// completes on its own with one open, but approval can, and that is the
+	// line a reader of the PR most needs.
+	if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
+		ID: "q4", Question: "is widening this scope intended?", Options: []string{"yes", "no"},
+	}); err != nil {
+		t.Fatalf("append question: %v", err)
+	}
+
 	section := buildReviewConversationSection(sctx)
 	for _, want := range []string{
 		"### Review conversation",
@@ -432,10 +441,17 @@ func TestBuildReviewConversationSection(t *testing.T) {
 		"**A** (captain)**:** Keep it behind a flag",
 		"**A** (unattributed)**:** No, narrow it",
 		"**Withdrawn by the reviewer:** the migration note answers it",
+		"is widening this scope intended?",
+		"**Unanswered:** the review gate was resolved with this question still open.",
 	} {
 		if !strings.Contains(section, want) {
 			t.Fatalf("section missing %q:\n%s", want, section)
 		}
+	}
+	// Unanswered must precede withdrawn, so the length bound drops the
+	// withdrawn record first.
+	if strings.Index(section, "**Unanswered:**") > strings.Index(section, "**Withdrawn by the reviewer:**") {
+		t.Fatalf("unanswered questions must be listed before withdrawn ones:\n%s", section)
 	}
 }
 
