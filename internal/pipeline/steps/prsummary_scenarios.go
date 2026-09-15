@@ -58,12 +58,33 @@ func collectTestingVerdict(sr *db.StepResult, rounds []*db.StepRound) string {
 	return ""
 }
 
+// collectTestingEvidenceReason returns the Test step's recorded account of
+// which path its diff-class gate took, or "" for a step that predates the gate.
+func collectTestingEvidenceReason(sr *db.StepResult, rounds []*db.StepRound) string {
+	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
+		if raw == nil || strings.TrimSpace(*raw) == "" {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*raw)
+		if err != nil {
+			continue
+		}
+		if reason := strings.TrimSpace(findings.EvidenceReason); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
 // renderLiveValidationLine is the one-line answer to "was this live
-// validated": the verdict plus how much of the scenario list was actually
-// driven against the product. It returns "" when neither is recorded.
-func renderLiveValidationLine(scenarios []types.TestScenario, verdict string) string {
+// validated": the verdict, how much of the scenario list was actually driven
+// against the product, and - because a verdict the agent never re-derived
+// reads identically otherwise - which path the diff-class gate took to get
+// it. It returns "" when none of the three is recorded.
+func renderLiveValidationLine(scenarios []types.TestScenario, verdict, evidenceReason string) string {
 	live, total := types.LiveScenarioCounts(scenarios)
-	if !types.IsKnownTestVerdict(verdict) && total == 0 {
+	evidenceReason = strings.TrimSpace(evidenceReason)
+	if !types.IsKnownTestVerdict(verdict) && total == 0 && evidenceReason == "" {
 		return ""
 	}
 	var b strings.Builder
@@ -77,6 +98,9 @@ func renderLiveValidationLine(scenarios []types.TestScenario, verdict string) st
 	}
 	if total > 0 {
 		b.WriteString(fmt.Sprintf(" - %d of %d scenarios driven live against the product", live, total))
+	}
+	if evidenceReason != "" {
+		b.WriteString(" (" + evidenceReason + ")")
 	}
 	return b.String()
 }

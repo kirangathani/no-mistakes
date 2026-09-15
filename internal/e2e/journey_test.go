@@ -1406,6 +1406,13 @@ func assertConfiguredCommandRun(t *testing.T, h *Harness) {
 		t.Fatalf("write e2e lint command: %v", err)
 	}
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-test-e2e\n  lint: nm-lint-e2e\n"
+	// The branch carries a product file as well as the config. The
+	// evidence turn's gate is the run's diff class, and a config-only
+	// branch has no product surface to drive, so a config-only fixture
+	// would prove nothing here. What this asserts is the separate
+	// invariant that a GREEN configured commands.test never substitutes
+	// for the evidence turn, which holds regardless of diff class.
+	h.CommitChange("configured-commands", "configured-commands.txt", "configured commands\n", "add configured commands feature")
 	head := h.CommitChange("configured-commands", ".no-mistakes.yaml", config, "enable configured checks")
 	h.PushToGate("configured-commands")
 	run := h.WaitForRun("configured-commands", 60*time.Second)
@@ -2165,6 +2172,11 @@ func assertFailingTestCommandRun(t *testing.T, h *Harness) {
 		t.Fatalf("write failing e2e test command: %v", err)
 	}
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-test-fails-e2e\n  lint: true\n"
+	// A product file rides along: the evidence turn this asserts runs
+	// only when the run's diff has a product surface to drive, and a
+	// config-only branch has none. The invariant under test is that a
+	// RED configured commands.test still gets the evidence turn.
+	h.CommitChange("failing-test-command", "failing-test-command.txt", "failing test command\n", "add failing test command feature")
 	h.CommitChange("failing-test-command", ".no-mistakes.yaml", config, "configure failing test command")
 	h.PushToGate("failing-test-command")
 	run := waitForStepStatus(t, h, "failing-test-command", types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
@@ -2235,6 +2247,36 @@ func assertFailingLintCommandRun(t *testing.T, h *Harness) {
 	h.CommitChange("failing-lint-command", ".no-mistakes.yaml", config, "configure failing lint command")
 	h.PushToGate("failing-lint-command")
 	run := waitForStepStatus(t, h, "failing-lint-command", types.StepLint, types.StepStatusAwaitingApproval, 60*time.Second)
+
+	// This branch changes only .no-mistakes.yaml, so it is also the
+	// journey's live check on the other side of the diff-class gate: the
+	// evidence turn has no product surface to drive, and the automatic
+	// no-surface it records must complete rather than park - otherwise a
+	// config-only or docs-only run would stop for a human.
+	gatedTestStep, ok := findStep(run.Steps, types.StepTest)
+	if !ok {
+		t.Fatal("expected test step in failing lint command run")
+	}
+	if gatedTestStep.Status != types.StepStatusCompleted {
+		t.Fatalf("expected the gated test step to complete without parking, got %s", gatedTestStep.Status)
+	}
+	if gatedTestStep.FindingsJSON == nil {
+		t.Fatal("expected the gated test step to record findings JSON")
+	}
+	gatedFindings, err := types.ParseFindingsJSON(*gatedTestStep.FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse gated test findings: %v", err)
+	}
+	if gatedFindings.Verdict != types.TestVerdictNoSurface {
+		t.Fatalf("expected a no-surface verdict for a config-only diff, got %q", gatedFindings.Verdict)
+	}
+	if gatedFindings.EvidenceSource != types.TestEvidenceSourceNoProductChange {
+		t.Fatalf("expected evidence source %q, got %q", types.TestEvidenceSourceNoProductChange, gatedFindings.EvidenceSource)
+	}
+	if len(gatedFindings.Scenarios) != 0 {
+		t.Fatalf("expected no scenarios when the evidence turn is skipped, got %+v", gatedFindings.Scenarios)
+	}
+
 	lintStep, ok := findStep(run.Steps, types.StepLint)
 	if !ok {
 		t.Fatal("expected lint step in failing lint command run")

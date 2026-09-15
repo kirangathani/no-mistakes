@@ -809,6 +809,56 @@ type TestRaw struct {
 	// (see EffectiveRepoConfig): a contributor's pushed branch must not be able
 	// to waive the configured-test gate that validates it.
 	AllowApproveOverFailure string `yaml:"allow_approve_over_failure"`
+	// NonProductPaths classifies which changed paths do NOT count as product
+	// or UI files, and therefore whether the live-evidence agent has anything
+	// to drive at all. It is the diff-class gate: the ~21-minute evidence turn
+	// runs only when the run's diff touches a product file, so a docs-only or
+	// workflow-only change no longer re-buys evidence it cannot produce.
+	//
+	// Absent (nil) means DefaultNonProductPaths. An explicitly empty list is a
+	// deliberate opt-out that makes every changed path product, so the agent
+	// always runs. Patterns follow the ignore_patterns match rules plus a
+	// leading "**/" for a directory at any depth (see the steps package's
+	// matchNonProductPattern).
+	//
+	// It decides whether the gate that validates a pushed branch runs, so like
+	// Instructions it is honored ONLY from the trusted default-branch copy of
+	// .no-mistakes.yaml (see EffectiveRepoConfig): a contributor must not be
+	// able to declare their own product code non-product and skip live
+	// validation of it.
+	NonProductPaths []string `yaml:"non_product_paths"`
+}
+
+// DefaultNonProductPaths is the built-in answer to "which changed paths cannot
+// carry a live-drivable product change": documentation and markdown, test
+// files and test fixtures, CI workflow definitions, scripts and tooling
+// directories, lockfiles, and the pipeline's own config file. A repository
+// replaces the whole list through test.non_product_paths.
+//
+// The test-file entries mirror isTestFile's naming conventions in
+// internal/pipeline/steps. They are restated here as data on purpose: the
+// configured list is the complete rule, so a maintainer who narrows it must be
+// able to see and remove every default it replaces.
+var DefaultNonProductPaths = []string{
+	// documentation and markdown
+	"*.md", "*.mdx", "docs/**",
+	// test files
+	"*_test.go", "*_test.rs", "test_*.py", "*_test.py", "test_*.rb",
+	"*Test.java", "*Tests.java",
+	"*.test.js", "*.test.ts", "*.test.jsx", "*.test.tsx",
+	"*.spec.js", "*.spec.ts", "*.spec.jsx", "*.spec.tsx",
+	// test fixtures
+	"**/testdata/**", "**/fixtures/**", "**/__fixtures__/**", "**/__snapshots__/**",
+	// CI workflow definitions
+	".github/workflows/**", ".github/actions/**", ".gitlab-ci.yml",
+	".circleci/**", "azure-pipelines.yml", "Jenkinsfile",
+	// scripts and tooling directories
+	"scripts/**", "tools/**", "hack/**",
+	// lockfiles
+	"go.sum", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock",
+	"poetry.lock", "uv.lock", "composer.lock", "Gemfile.lock", "Pipfile.lock",
+	// the pipeline's own config
+	".no-mistakes.yaml", ".no-mistakes.yml",
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -851,6 +901,10 @@ type Test struct {
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	// NonProductPaths is always populated: the repository's trusted list when
+	// it set one, DefaultNonProductPaths otherwise. An explicitly empty
+	// configured list resolves to an empty slice, not the defaults.
+	NonProductPaths []string
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -2541,6 +2595,11 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// trusted-only for the same reason no_ci is: a pushed branch must not
 		// waive the gate that certifies it.
 		effective.Test.AllowApproveOverFailure = trusted.Test.AllowApproveOverFailure
+		// test.non_product_paths decides whether the live-evidence gate runs at
+		// all for a change. It is trusted-only for the same reason
+		// test.instructions is: a contributor must not be able to declare their
+		// own product code non-product and skip the live validation of it.
+		effective.Test.NonProductPaths = append([]string(nil), trusted.Test.NonProductPaths...)
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -2564,6 +2623,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Evidence.Branch = nil
 		effective.Test.Instructions = ""
 		effective.Test.AllowApproveOverFailure = ""
+		effective.Test.NonProductPaths = nil
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -2791,7 +2851,49 @@ func validateTestRaw(test TestRaw) error {
 	if test.Evidence.MaxRuns != nil && *test.Evidence.MaxRuns < 0 {
 		return fmt.Errorf("test.evidence.max_runs must be 0 (keep every run) or greater, got %d", *test.Evidence.MaxRuns)
 	}
+	// A malformed glob would silently match nothing, which turns the whole
+	// repository back into product code and quietly restores the per-run
+	// evidence bill the gate exists to remove. Surface the typo in the config
+	// instead. Like the fields above, this also validates the PUSHED copy even
+	// though only the trusted list is honored.
+	for _, pattern := range test.NonProductPaths {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed == "" {
+			return errors.New("test.non_product_paths: pattern must not be empty")
+		}
+		if err := validateNonProductGlob(trimmed); err != nil {
+			return fmt.Errorf("test.non_product_paths %q: %w", trimmed, err)
+		}
+	}
 	return nil
+}
+
+// validateNonProductGlob accepts the ignore_patterns glob syntax plus a
+// leading "**/", which names a directory or basename at any depth.
+func validateNonProductGlob(pattern string) error {
+	if rest, ok := strings.CutPrefix(pattern, "**/"); ok {
+		if rest == "" {
+			return errors.New("any-depth pattern needs a path after **/")
+		}
+		return validatePathInstructionGlob(rest)
+	}
+	return validatePathInstructionGlob(pattern)
+}
+
+// resolveNonProductPaths trims the configured list and drops entries left
+// empty. A nil list means the repository configured nothing, which takes
+// DefaultNonProductPaths; a non-nil list is authoritative even when empty.
+func resolveNonProductPaths(configured []string) []string {
+	if configured == nil {
+		return append([]string(nil), DefaultNonProductPaths...)
+	}
+	resolved := make([]string, 0, len(configured))
+	for _, pattern := range configured {
+		if trimmed := strings.TrimSpace(pattern); trimmed != "" {
+			resolved = append(resolved, trimmed)
+		}
+	}
+	return resolved
 }
 
 // applyProvidersOverrides applies non-nil raw values onto resolved defaults.
@@ -2969,6 +3071,11 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	// is already trusted-only.
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
+	// Resolved from the repository only, for the same reason Instructions is:
+	// the classification describes ONE repository's layout. An absent list
+	// (nil) takes the built-in defaults; an explicitly empty one stays empty so
+	// a repository can opt every path back into being product code.
+	test.NonProductPaths = resolveNonProductPaths(repo.Test.NonProductPaths)
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {
