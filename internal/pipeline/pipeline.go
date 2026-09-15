@@ -15,20 +15,20 @@ var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
-	Ctx                   context.Context
-	Run                   *db.Run
-	Repo                  *db.Repo
-	WorkDir               string
-	GateDir               string
-	Agent                 agent.Agent
-	Config                *config.Config
-	ForgeContext          *forgecontext.Context
-	DB                    *db.DB
-	Log                   func(string) // discrete log line (newline-terminated, user-visible + file)
-	LogChunk              func(string) // raw streaming chunk (user-visible + file)
-	LogFile               func(string) // file-only log callback (not shown to user)
-	Fixing                bool         // true when re-executing after a "fix" action
-	SkipFixExecution      bool         // replay an already-completed fix round's review turn only
+	Ctx              context.Context
+	Run              *db.Run
+	Repo             *db.Repo
+	WorkDir          string
+	GateDir          string
+	Agent            agent.Agent
+	Config           *config.Config
+	ForgeContext     *forgecontext.Context
+	DB               *db.DB
+	Log              func(string) // discrete log line (newline-terminated, user-visible + file)
+	LogChunk         func(string) // raw streaming chunk (user-visible + file)
+	LogFile          func(string) // file-only log callback (not shown to user)
+	Fixing           bool         // true when re-executing after a "fix" action
+	SkipFixExecution bool         // replay an already-completed fix round's review turn only
 	// FinalizingAnswers is true when re-executing after a types.ActionAnswer
 	// response: every question the reviewer left open has been answered, and
 	// the step resumes the SAME reviewer session with those answers so it can
