@@ -46,6 +46,18 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// Best-effort: a diff-stat failure leaves the workload unknown.
 	workload := reviewWorkload(ctx, sctx.WorkDir, baseSHA, sctx.Run.HeadSHA)
 
+	// The review conversation (see
+	// docs/src/content/docs/concepts/review-conversation.md). A fix round is
+	// the one boundary a reviewer session must never cross: the code under
+	// review changed, and the session that prescribed the change would then be
+	// certifying it. Dropping the identity here - before any turn of this
+	// round runs - is what makes the rereview below genuinely cold, in this
+	// process and after a daemon restart.
+	convDir := reviewConversationDir(sctx)
+	if sctx.Fixing {
+		sctx.Sessions.Forget(pipeline.SessionRoleReviewer)
+	}
+
 	// In fix mode, ask the agent to fix issues first.
 	//
 	// The verification-discipline rules below (apply all fixes first, then one
@@ -198,7 +210,7 @@ Previous review findings to address:
 	// net-deleted-author-lines git-diff backstop for the removal-of-required
 	// class - a fixer round that net-deletes author-added lines parks
 	// regardless of intent source. Held pending a scope decision.
-	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
 
 	// Path-scoped repository review guidance, taken from the trusted
 	// default-branch config copy (regardless of allow_repo_commands) so a pushed
@@ -308,7 +320,7 @@ Risk assessment (after listing all findings):
 - Set risk_level to "medium" if the change has room to improve but is safe to merge first with concerns addressed as follow-ups.
 - Set risk_level to "high" if the change should not be merged without explicit human approval - it is fundamental, risky, ambiguous, or has strong negative signals.
 - Provide a one-sentence risk_rationale explaining why you chose that risk level.
-- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s`,
+- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s%s`,
 		branch,
 		baseSHA,
 		sctx.Run.HeadSHA,
@@ -317,28 +329,47 @@ Risk assessment (after listing all findings):
 		ignorePatterns,
 		historySection,
 		pathInstructions,
+		reviewQuestionProtocolSection(convDir, loadReviewConversation(sctx, convDir)),
 	)
 
-	// Every review turn - the initial review and every post-fix rereview -
-	// deliberately runs session-free. Round N's fixes implement round N-1's
-	// review findings, so resuming any prior review turn's session would seat
-	// the prescriber of those fixes as their certifier: the rereview then
-	// verifies that its own prescription was implemented instead of judging
-	// whether the pipeline-authored code is correct (the mechanism behind a
-	// real shipped defect where one fix round wrote both wrong code and the
-	// test blessing it, and the resumed reviewer session passed them). The
-	// cross-round context a rereview legitimately needs travels in the
-	// explicit sanitized round-history section above; only the fixer keeps a
-	// durable session (executeFixMode), because it certifies nothing.
+	// A review PASS keeps one session; a review ROUND never inherits another
+	// round's. Round N's fixes implement round N-1's review findings, so
+	// resuming a review session across a code change would seat the prescriber
+	// of those fixes as their certifier: the rereview then verifies that its
+	// own prescription was implemented instead of judging whether the
+	// pipeline-authored code is correct (the mechanism behind a real shipped
+	// defect where one fix round wrote both wrong code and the test blessing
+	// it, and the resumed reviewer session passed them). Forget above is what
+	// enforces that, so what the reviewer role spans here is exactly one pass:
+	// the turn that asks, and the finalize turn that receives the answers. The
+	// cross-round context a rereview legitimately needs still travels only in
+	// the explicit sanitized round-history section above.
+	//
+	// The finalize turn's prompt is the WHOLE review prompt plus the answers,
+	// not a bare "here are your answers" message, because a resume can fail
+	// (dead session id, an adapter without resume support, session_reuse off).
+	// RunSessions then re-runs the same turn cold, and a self-sufficient prompt
+	// makes that a slower review rather than a meaningless one.
 	//
 	// A review whose final JSON fails validation is a formatting slip, not a
-	// verdict, so it is rerun as a fresh session-free review of the same
-	// prompt, told only the validation error, up to reviewAnalyzerMaxAttempts.
-	// Findings come only from the attempt that validates. Every other failure
-	// returns at once, and so does a rejection from a turn its deadline or a
-	// cancellation cut short.
+	// verdict, so it is rerun with the same prompt plus the validation error,
+	// up to reviewAnalyzerMaxAttempts. Findings come only from the attempt that
+	// validates. Every other failure returns at once, and so does a rejection
+	// from a turn its deadline or a cancellation cut short.
+	turnPrompt := prompt
+	sessionRole := pipeline.SessionRole("")
+	if convDir != "" && !sctx.Fixing {
+		sessionRole = pipeline.SessionRoleReviewer
+		if sctx.FinalizingAnswers {
+			conv := loadReviewConversation(sctx, convDir)
+			if answers := reviewAnswersPromptSection(conv); answers != "" {
+				turnPrompt = prompt + answers
+				sctx.Log(fmt.Sprintf("resuming the review with %d answered question(s)", len(conv.Answered())))
+			}
+		}
+	}
 	opts := agent.RunOpts{
-		Prompt:     prompt,
+		Prompt:     turnPrompt,
 		CWD:        sctx.WorkDir,
 		Env:        sctx.Env,
 		JSONSchema: reviewFindingsSchema,
@@ -348,7 +379,7 @@ Risk assessment (after listing all findings):
 	}
 	var findings Findings
 	for attempt := 1; ; attempt++ {
-		result, err := s.runReviewAgent(sctx, "agent review", "", opts)
+		result, err := s.runReviewAgent(sctx, "agent review", sessionRole, opts)
 		if err == nil {
 			findings, err = parseReviewAnalyzerOutput(result)
 			if err == nil {
@@ -361,7 +392,7 @@ Risk assessment (after listing all findings):
 			return nil, fmt.Errorf("validate review analyzer findings after %d attempts: %w", reviewAnalyzerMaxAttempts, err)
 		}
 		sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
-		opts.Prompt = prompt + reviewRetryNote(err)
+		opts.Prompt = turnPrompt + reviewRetryNote(err)
 	}
 
 	// Phase ownership boundary: drop findings that only claim later pipeline-
@@ -371,6 +402,19 @@ Risk assessment (after listing all findings):
 	if stripped, n := stripDeferredPipelineOwnedDeliveryFindings(findings); n > 0 {
 		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
 		findings = stripped
+	}
+
+	// Read the conversation the turn that just ended left behind. Answers
+	// arriving mid-turn are recorded here, once, so the next COLD reviewer -
+	// in this run or a later one - reads them as settled; open questions
+	// become ask-user findings, which is what parks the step in
+	// waiting-on-answers. The step never completes with a question open.
+	conv := loadReviewConversation(sctx, convDir)
+	recordAnsweredQuestions(sctx, conv)
+	questionFindings := openReviewQuestionFindings(conv)
+	if len(questionFindings) > 0 {
+		sctx.Log(fmt.Sprintf("review is waiting on answers to %d question(s)", len(questionFindings)))
+		findings.Items = append(findings.Items, questionFindings...)
 	}
 
 	needsApproval := hasBlockingFindings(findings.Items)

@@ -22,6 +22,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -300,7 +301,12 @@ func (e *Executor) initializeRunScopes(runID string) {
 }
 
 type stepExecutionState struct {
-	fixing           bool
+	fixing bool
+	// answering re-enters a review step whose gate parked on its reviewer's own
+	// open questions, now that every one of them has an answer. It is not a fix
+	// round and must never be set together with fixing: no code changed, and
+	// the same reviewer session is resumed to finish its pass.
+	answering        bool
 	previousFindings string
 	deferredFindings string
 	roundNum         int
@@ -496,35 +502,48 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
-	case types.ActionFix:
-		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
-		selected := filterFindingsJSON(gate.findings, response.findingIDs)
-		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
-		if gate.lastRoundID != "" {
-			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, merged)
-			if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
-				var userFindingsJSON *string
-				if merged != "" && merged != selected {
-					userFindingsJSON = &merged
-				}
-				if dbErr := e.db.SetStepRoundUserDecision(gate.lastRoundID, &idsJSON, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
-					slog.Warn("failed to record recovered user decision", "step", gate.step.Name(), "round", gate.round, "error", dbErr)
+	// A fix round and an answered review question re-enter the same step the
+	// same way; only the bookkeeping before it and the state handed in differ.
+	// An answer is not a verdict, so it records no selection on the round -
+	// leaving one would read as the human declining the round's findings.
+	case types.ActionFix, types.ActionAnswer:
+		state := stepExecutionState{
+			roundNum:        gate.round,
+			autoFixAttempts: gate.autoFixes,
+			executionMS:     duration,
+			currentRoundID:  gate.lastRoundID,
+		}
+		if response.action == types.ActionAnswer {
+			state.answering = true
+			if dbErr := e.db.UpdateStepStatus(gate.stepResult.ID, types.StepStatusRunning); dbErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("return recovered step %s to running: %w", gate.step.Name(), dbErr), ctx)
+			}
+			e.emitStepEvent(ipc.EventStepStarted, run, repo, gate.step.Name(), string(types.StepStatusRunning))
+		} else {
+			telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
+			selected := filterFindingsJSON(gate.findings, response.findingIDs)
+			merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
+			if gate.lastRoundID != "" {
+				allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, merged)
+				if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
+					var userFindingsJSON *string
+					if merged != "" && merged != selected {
+						userFindingsJSON = &merged
+					}
+					if dbErr := e.db.SetStepRoundUserDecision(gate.lastRoundID, &idsJSON, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
+						slog.Warn("failed to record recovered user decision", "step", gate.step.Name(), "round", gate.round, "error", dbErr)
+					}
 				}
 			}
+			if dbErr := e.db.StartStepFixRound(gate.stepResult.ID, e.autoFixLimit(gate.step.Name())); dbErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("mark recovered step %s fixing: %w", gate.step.Name(), dbErr), ctx)
+			}
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
+			state.fixing = true
+			state.previousFindings = merged
+			state.deferredFindings = removeMatchingFindingsJSON(gate.findings, selected)
 		}
-		if dbErr := e.db.StartStepFixRound(gate.stepResult.ID, e.autoFixLimit(gate.step.Name())); dbErr != nil {
-			return e.failRun(run, repo, fmt.Errorf("mark recovered step %s fixing: %w", gate.step.Name(), dbErr), ctx)
-		}
-		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
-		skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{
-			fixing:           true,
-			previousFindings: merged,
-			deferredFindings: removeMatchingFindingsJSON(gate.findings, selected),
-			roundNum:         gate.round,
-			autoFixAttempts:  gate.autoFixes,
-			executionMS:      duration,
-			currentRoundID:   gate.lastRoundID,
-		})
+		skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, state)
 		if err != nil {
 			return e.failRun(run, repo, err, ctx)
 		}
@@ -857,26 +876,27 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:              ctx,
-		Run:              run,
-		Repo:             repo,
-		WorkDir:          workDir,
-		GateDir:          e.paths.RepoDir(repo.ID),
-		Agent:            stepAgent,
-		Config:           e.config,
-		ForgeContext:     e.forge,
-		DB:               e.db,
-		StepResultID:     sr.ID,
-		UserIntent:       userIntent,
-		IntentSource:     userIntentSource,
-		Sessions:         e.sessions,
-		Shared:           e.shared,
-		EvidenceDir:      e.runEvidenceDir(run.ID),
-		Fixing:           state.fixing,
-		PreviousFindings: state.previousFindings,
-		DeferredFindings: state.deferredFindings,
-		Log:              writeLog,
-		LogChunk:         writeLogChunk,
+		Ctx:               ctx,
+		Run:               run,
+		Repo:              repo,
+		WorkDir:           workDir,
+		GateDir:           e.paths.RepoDir(repo.ID),
+		Agent:             stepAgent,
+		Config:            e.config,
+		ForgeContext:      e.forge,
+		DB:                e.db,
+		StepResultID:      sr.ID,
+		UserIntent:        userIntent,
+		IntentSource:      userIntentSource,
+		Sessions:          e.sessions,
+		Shared:            e.shared,
+		EvidenceDir:       e.runEvidenceDir(run.ID),
+		Fixing:            state.fixing,
+		FinalizingAnswers: state.answering,
+		PreviousFindings:  state.previousFindings,
+		DeferredFindings:  state.deferredFindings,
+		Log:               writeLog,
+		LogChunk:          writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
@@ -887,6 +907,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	}
 	if stepName == types.StepReview {
 		BindUncertifiedPipelineRange(sctx)
+		// Must follow BindUncertifiedPipelineRange: it skips a run whose
+		// rounds that channel already carries.
+		BindPreviousRunReviewRounds(sctx)
 	}
 	// Every step, not just review: the steps that used to re-apply a declined
 	// change were precisely the ones a decision never reached.
@@ -1135,6 +1158,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
 			}
 			sctx.Fixing = true
+			sctx.FinalizingAnswers = false
 			selectedFindings := filterFindingsJSON(outcome.Findings, response.findingIDs)
 			mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
 			sctx.PreviousFindings = mergedFindings
@@ -1154,6 +1178,23 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
 			slog.Info("step fix requested, re-executing", "step", stepName)
+			continue // loop back to step.Execute
+
+		case types.ActionAnswer:
+			// Every question the reviewer left open has been answered. This is
+			// not a verdict on the round and not a fix: no code changed, and
+			// the round is deliberately left without a recorded selection, so
+			// it never reads as a human declining its findings. The step goes
+			// back to running and re-executes, which resumes the SAME reviewer
+			// session with the answers.
+			phaseStart = time.Now()
+			writeLog(fmt.Sprintf("answers received; resuming the review after round %d", roundNum))
+			if dbErr := markRunning(); dbErr != nil {
+				slog.Warn("failed to return step status to running", "step", stepName, "error", dbErr)
+			}
+			sctx.FinalizingAnswers = true
+			nextTrigger = "answer"
+			slog.Info("review answers received, re-executing", "step", stepName)
 			continue // loop back to step.Execute
 		}
 	}
@@ -1775,4 +1816,16 @@ func selectedFindingCount(raw string, ids []string) int {
 		return len(ids)
 	}
 	return findingsCount(raw)
+}
+
+// ReviewConversationDir is where a run's review conversation files live.
+//
+// The executor is the single owner of that answer, for the same reason it owns
+// runEvidenceDir: the path depends on the run's EFFECTIVE config
+// (test.evidence.local_root), which only the executor holds. Callers outside
+// the pipeline - the daemon's answer handler - ask here rather than
+// re-deriving it from global config and drifting from where the reviewer was
+// actually told to write.
+func (e *Executor) ReviewConversationDir(runID string) string {
+	return reviewqa.Dir(e.runEvidenceDir(runID))
 }

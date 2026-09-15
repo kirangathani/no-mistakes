@@ -29,6 +29,12 @@ type StepContext struct {
 	LogFile               func(string) // file-only log callback (not shown to user)
 	Fixing                bool         // true when re-executing after a "fix" action
 	SkipFixExecution      bool         // replay an already-completed fix round's review turn only
+	// FinalizingAnswers is true when re-executing after a types.ActionAnswer
+	// response: every question the reviewer left open has been answered, and
+	// the step resumes the SAME reviewer session with those answers so it can
+	// finish the pass it parked mid-way. No code changed, so this is not a fix
+	// round and must never set Fixing.
+	FinalizingAnswers     bool
 	ReviewStartingHeadSHA string
 	PreviousFindings      string // JSON findings selected for the current fix round
 	DeferredFindings      string // JSON findings left unselected when the current fix round began
@@ -73,6 +79,15 @@ type StepContext struct {
 	// context only.
 	PriorBranchDecisions          []*db.BranchDecisionRound
 	PriorBranchDecisionsTruncated bool
+	// PreviousRunReviewRounds are the review rounds of the most recent OTHER
+	// run on this branch, and PreviousRunID names it. They are bound on the
+	// review step so a run that superseded a parked one - which is what an
+	// author's own fix push does - still carries what the previous round found
+	// and what was already answered. The code itself is still reviewed cold.
+	// Nil when there is no such run, or when the uncertified-range channel
+	// already carries the same run's rounds.
+	PreviousRunID           string
+	PreviousRunReviewRounds []*db.StepRound
 	// Sessions manages the run's durable review-fixer session. The session
 	// machinery remains role-generic for legacy recovery; nil runs every
 	// invocation cold.
