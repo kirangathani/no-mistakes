@@ -77,6 +77,13 @@ They surface:
 - in the PR body's Pipeline section, beside the review conversation, together
   with which notes each step applied.
 
+A consuming step declares `applied_notes` in its output schema **only when it
+actually received notes**. That is not cosmetic: the codex adapter rewrites
+every declared property as required, so a step given no report - and any agent
+whose output predates the field - would be rejected for a field it has nothing
+to say about. The field is never in `required` either; an agent that ignores it
+still parses, and its notes are recorded as unaddressed.
+
 ## The document step consumes the doc report
 
 The document step's scope widens from documentation to documentation **and code
