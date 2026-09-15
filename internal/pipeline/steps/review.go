@@ -47,14 +47,22 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	workload := reviewWorkload(ctx, sctx.WorkDir, baseSHA, sctx.Run.HeadSHA)
 
 	// The review conversation (see
-	// docs/src/content/docs/concepts/review-conversation.md). A fix round is
-	// the one boundary a reviewer session must never cross: the code under
-	// review changed, and the session that prescribed the change would then be
-	// certifying it. Dropping the identity here - before any turn of this
-	// round runs - is what makes the rereview below genuinely cold, in this
-	// process and after a daemon restart.
+	// docs/src/content/docs/concepts/review-conversation.md).
+	//
+	// A reviewer session may be resumed by exactly one kind of turn: the
+	// finalize turn that receives the answers to the questions that same pass
+	// asked, where no code has changed in between. Every other entry into this
+	// step drops the identity first, so a stale session can never be seated as
+	// the certifier of code written after it reviewed. The cases that would
+	// otherwise do exactly that are a fix round (its fixes implement the
+	// findings of the session that would judge them) and a restart back to
+	// review after a CI repair (RestartFrom, which re-enters the step on a new
+	// head inside the same run, and therefore the same RunSessions). Dropping
+	// it here - before any turn of this round runs - also survives a daemon
+	// restart, because Forget deletes the persisted row too.
 	convDir := reviewConversationDir(sctx)
-	if sctx.Fixing {
+	resumingAnswers := sctx.FinalizingAnswers && !sctx.Fixing && convDir != ""
+	if !resumingAnswers {
 		sctx.Sessions.Forget(pipeline.SessionRoleReviewer)
 	}
 
@@ -358,13 +366,15 @@ Risk assessment (after listing all findings):
 	turnPrompt := prompt
 	sessionRole := pipeline.SessionRole("")
 	if convDir != "" && !sctx.Fixing {
+		// A fresh identity unless this is the finalize turn of the pass that
+		// asked; Forget above already dropped any stale one.
 		sessionRole = pipeline.SessionRoleReviewer
-		if sctx.FinalizingAnswers {
-			conv := loadReviewConversation(sctx, convDir)
-			if answers := reviewAnswersPromptSection(conv); answers != "" {
-				turnPrompt = prompt + answers
-				sctx.Log(fmt.Sprintf("resuming the review with %d answered question(s)", len(conv.Answered())))
-			}
+	}
+	if resumingAnswers {
+		conv := loadReviewConversation(sctx, convDir)
+		if answers := reviewAnswersPromptSection(conv); answers != "" {
+			turnPrompt = prompt + answers
+			sctx.Log(fmt.Sprintf("resuming the review with %d answered question(s)", len(conv.Answered())))
 		}
 	}
 	opts := agent.RunOpts{
@@ -407,7 +417,8 @@ Risk assessment (after listing all findings):
 	// arriving mid-turn are recorded here, once, so the next COLD reviewer -
 	// in this run or a later one - reads them as settled; open questions
 	// become ask-user findings, which is what parks the step in
-	// waiting-on-answers. The step never completes with a question open.
+	// waiting-on-answers. The step never completes on its own with a question
+	// open; a human's approval still can, and the PR body says so.
 	conv := loadReviewConversation(sctx, convDir)
 	recordAnsweredQuestions(sctx, conv)
 	questionFindings := openReviewQuestionFindings(conv)

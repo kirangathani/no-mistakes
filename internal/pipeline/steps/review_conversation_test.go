@@ -583,3 +583,61 @@ func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T)
 		t.Fatalf("finalize replay is missing the answer:\n%s", reviews[2].Prompt)
 	}
 }
+
+// TestReviewStep_OnlyAFinalizeTurnResumesTheReviewerSession pins the rule that
+// keeps the independence guarantee whole: a stored reviewer identity may be
+// resumed by the finalize turn of the pass that created it, and by nothing
+// else. The case that would otherwise violate it without any fix round is a
+// restart back to review inside the same run (a CI repair's RestartFrom), which
+// re-enters this step on a NEW head while RunSessions still holds the identity
+// of the session that reviewed the old one.
+func TestReviewStep_OnlyAFinalizeTurnResumesTheReviewerSession(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		finalizingAnswers bool
+		fixing            bool
+		wantResumeOf      string
+	}{
+		{name: "finalize turn resumes the asking session", finalizingAnswers: true, wantResumeOf: "stale-sess"},
+		{name: "plain re-entry starts fresh", wantResumeOf: ""},
+		{name: "fix round runs cold", fixing: true, wantResumeOf: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			mock := &sessionMockAgent{}
+			mock.respond = func(agent.RunOpts) *agent.Result {
+				return &agent.Result{Output: []byte(cleanReviewJSON)}
+			}
+			sctx := newTestContextWithDBRecords(t, mock, dir, baseSHA, headSHA, config.Commands{})
+			if err := sctx.DB.UpsertRunAgentSession(sctx.Run.ID, string(pipeline.SessionRoleReviewer), mock.Name(), "stale-sess"); err != nil {
+				t.Fatalf("seed reviewer session: %v", err)
+			}
+			sctx.Sessions = pipeline.NewRunSessions(sctx.DB, sctx.Run.ID, mock, true)
+			sctx.FinalizingAnswers = tc.finalizingAnswers
+			sctx.Fixing = tc.fixing
+			sctx.SkipFixExecution = true
+
+			if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			reviews := reviewCalls(mock.snapshot())
+			if len(reviews) != 1 {
+				t.Fatalf("expected one review turn, got %d", len(reviews))
+			}
+			switch {
+			case tc.fixing:
+				if reviews[0].Session != nil {
+					t.Fatalf("a fix round's rereview must be session-free, got %+v", reviews[0].Session)
+				}
+			case tc.wantResumeOf == "":
+				if reviews[0].Session == nil || reviews[0].Session.ID != "" {
+					t.Fatalf("re-entry must start a fresh reviewer session, got %+v", reviews[0].Session)
+				}
+			default:
+				if reviews[0].Session == nil || reviews[0].Session.ID != tc.wantResumeOf {
+					t.Fatalf("finalize turn must resume %q, got %+v", tc.wantResumeOf, reviews[0].Session)
+				}
+			}
+		})
+	}
+}
