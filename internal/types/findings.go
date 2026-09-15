@@ -478,6 +478,26 @@ func HasActionableFindings(findings Findings) bool {
 	return false
 }
 
+// HasReviewQuestion reports whether a gate is parked on a question its
+// reviewer asked and nobody has answered.
+//
+// It qualifies HasActionableFindings above, which counts an open question as
+// actionable because its action is ask-user. That is right for every other
+// ask-user finding and wrong for this one: a question is resolved by an
+// ANSWER, not by a verdict and not by a fix, so yolo / auto-resolve has to
+// recognize it and stand aside rather than treating it as standing consent.
+// Keyed on the category, never on the finding ID's "question-" prefix, so an
+// agent-authored finding that happens to be named that way is never mistaken
+// for one.
+func HasReviewQuestion(findings Findings) bool {
+	for _, item := range findings.Items {
+		if item.Category == FindingCategoryReviewQuestion {
+			return true
+		}
+	}
+	return false
+}
+
 func summarizeSelectedFindings(count int) string {
 	switch count {
 	case 0:
