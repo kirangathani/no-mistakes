@@ -55,16 +55,17 @@ func TestGetBranchTestEvidence_ScopesToOtherRunsOnTheSameBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("entries = %+v, want only the other same-branch test step", got)
+	if got == nil {
+		t.Fatal("entry = nil, want the other same-branch test step")
 	}
-	if got[0].RunID != wanted.ID || got[0].FindingsJSON != payload {
-		t.Fatalf("entry = %+v, want run %s with its recorded findings", got[0], wanted.ID)
+	if got.RunID != wanted.ID || got.FindingsJSON != payload {
+		t.Fatalf("entry = %+v, want run %s with its recorded findings", got, wanted.ID)
 	}
 }
 
-// The most recently completed evidence is what a reuse should consider first.
-func TestGetBranchTestEvidence_NewestCompletionFirst(t *testing.T) {
+// Only the most recently completed evidence is returned at all: an older
+// verdict a later run has already superseded must never outrank it.
+func TestGetBranchTestEvidence_ReturnsOnlyTheNewestCompletion(t *testing.T) {
 	d := openTestDB(t)
 	repo, err := d.InsertRepo(t.TempDir(), "https://example.invalid/a", "main")
 	if err != nil {
@@ -93,10 +94,27 @@ func TestGetBranchTestEvidence_NewestCompletionFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("entries = %d, want 3", len(got))
+	if got == nil {
+		t.Fatal("entry = nil, want the most recently completed run")
 	}
-	if got[0].RunID != ids[2] {
-		t.Fatalf("first entry = %s, want the most recently completed run %s", got[0].RunID, ids[2])
+	if got.RunID != ids[2] {
+		t.Fatalf("entry = %s, want only the most recently completed run %s", got.RunID, ids[2])
+	}
+}
+
+// Nothing recorded on the branch is not an error: the caller simply falls
+// through to running the evidence agent.
+func TestGetBranchTestEvidence_NoEvidenceIsNotAnError(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo(t.TempDir(), "https://example.invalid/a", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetBranchTestEvidence(repo.ID, "feature", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("entry = %+v, want nil", got)
 	}
 }

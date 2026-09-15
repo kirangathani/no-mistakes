@@ -2645,7 +2645,16 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// test.non_product_paths is: a contributor must not be able to turn off
 		// the live validation of their own branch.
 		effective.Test.EvidenceGate = trusted.Test.EvidenceGate
-		effective.Test.NonProductPaths = append([]string(nil), trusted.Test.NonProductPaths...)
+		// Copying through a nil slice would erase the difference between "the
+		// repository configured nothing" and "the repository explicitly wrote
+		// non_product_paths: []", which resolveNonProductPaths reads as the
+		// opt-out that makes every path product. YAML decodes an empty
+		// sequence to a non-nil empty slice, and append([]string(nil)) of one
+		// returns nil, so the emptiness has to be preserved deliberately.
+		effective.Test.NonProductPaths = nil
+		if trusted.Test.NonProductPaths != nil {
+			effective.Test.NonProductPaths = append([]string{}, trusted.Test.NonProductPaths...)
+		}
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
