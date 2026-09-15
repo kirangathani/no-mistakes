@@ -326,7 +326,37 @@ var reviewFindingsSchema = json.RawMessage(`{
 		},
 		"risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
 		"risk_rationale": {"type": "string"},
-		"risk_scope": {"type": "string", "enum": ["source-or-external", "pipeline-owned-delivery"]}
+		"risk_scope": {"type": "string", "enum": ["source-or-external", "pipeline-owned-delivery"]},
+		"doc_report": {
+			"type": "array",
+			"description": "observations whose remedy is documentation or the wording of a comment, test name, or descriptive string. Handed to the document step, never reported as findings.",
+			"items": {
+				"type": "object",
+				"properties": {
+					"id": {"type": "string", "description": "short stable id such as doc1"},
+					"file": {"type": "string"},
+					"line": {"type": "integer"},
+					"problem": {"type": "string", "description": "what is wrong"},
+					"right_looks_like": {"type": "string", "description": "what the corrected text should say"}
+				},
+				"required": ["problem"]
+			}
+		},
+		"lint_report": {
+			"type": "array",
+			"description": "observations the project's lint command, formatter, or type checker would catch deterministically. Handed to the lint step, never reported as findings.",
+			"items": {
+				"type": "object",
+				"properties": {
+					"id": {"type": "string", "description": "short stable id such as lint1"},
+					"file": {"type": "string"},
+					"line": {"type": "integer"},
+					"problem": {"type": "string", "description": "what is wrong"},
+					"right_looks_like": {"type": "string", "description": "what the corrected code should be"}
+				},
+				"required": ["problem"]
+			}
+		}
 	},
 	"required": ["findings", "risk_level", "risk_rationale", "risk_scope"]
 }`)

@@ -304,7 +304,7 @@ Rules:
 - Use severity "error" for problems that should absolutely not get merged, "warning" for things that are worth addressing but can be done in a follow up, and "info" for things that are nice to have.
 - Be concise and actionable. No generic advice like "add more tests".
 - Only comment on things that genuinely matter.
-- Do NOT report styling, formatting, linting, compilation, or type-checking issues.
+- Do NOT report styling, formatting, linting, compilation, or type-checking issues as findings; record them in "lint_report" (see Handoff reports below).
 - If the change is clean, return an empty findings array.
 - For each finding, set the action field to one of:
   - "ask-user": the finding is about functional requirements or product behavior, or otherwise challenges the author's deliberate intent. Even if it seems obviously wrong, we should ask the user for review. Examples: "this feature seems unnecessary", "this hardcoded value should be configurable", "this deletion looks wrong". When in doubt, default to "ask-user".
@@ -315,6 +315,16 @@ Rules:
   - "source": every source-verifiable finding, including any finding that mixes a source defect with a delivery claim.
   - "pipeline-owned-delivery": only a finding whose sole claim is that this run's remote branch, push, PR, or CI output is not present yet.
   - "external-delivery": a pre-existing or external PR, third-party artifact, or other lifecycle requirement not owned by this run.
+
+Handoff reports (recorded instead of reported; they never park the run and never start a fix round):
+- The document step and the lint step run after this review and own two classes of remedy. Their changes are never re-reviewed, while every finding you report costs either a human's decision at the review gate or a fix round plus a full cold re-review of the whole change. So do not report either class as a finding, at any severity: record it as a note in the matching report.
+- "doc_report" - the remedy is documentation or wording: a README, anything under docs/, a changelog or any other prose file; a documentation list missing an entry; the WORDING of a code or workflow comment; a test NAME; a log, error, or summary string that merely describes what the code does.
+- "lint_report" - the project's configured lint command, formatter, or type checker would catch it deterministically: a declared type the checker rejects, a lint rule, formatting, an unused import or variable, a missing or wrong generated artifact a checker regenerates.
+- Each note carries a short stable "id" ("doc1", "lint1", ...), the "file" and one-indexed "line", "problem" (what is wrong), and "right_looks_like" (what the corrected text should say). Be specific enough that the later step can act without re-deriving your reasoning, and never make the change yourself.
+- Return the FULL report every time you review. The last report wins; do not retract or supersede an earlier note.
+- These remain findings and you must still report them: defects, including a computation that returns a wrong value without failing; security and privacy; a departure from the stated intent; everything the Simplification pass below produces; and a type hint, doc comment, or code comment that is WRONG in a way the tool accepts and that would mislead a caller.
+- The boundary is the remedy, not the topic. "This comment overstates what the guard does" is a doc note. "This comment says the function returns nil on error when it returns a zero value, so a caller checking for nil misses the failure" is a finding: the claim itself is false and a caller acts on it. "The README example still passes the old flag name" is a doc note; "the code still reads the old flag name, so the documented one is ignored" is a finding.
+- A wording or lint observation you would previously have reported at severity "info" is a note, not a finding. Return an empty array for a report with nothing in it.
 
 Simplification (a dedicated pass over what the change introduced, in addition to the findings above):
 - Enumerate every component the change introduced: a new branch, acceptance or matching path, fallback, alias, mode, flag, option, a second definition of a concept the code already defines once, or a parallel copy of a rule. Judge each one against the User intent when one is stated, otherwise against the change's own stated purpose. The stated purpose sets the required scope, not the implementation.
@@ -412,6 +422,13 @@ Risk assessment (after listing all findings):
 		sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
 		opts.Prompt = turnPrompt + reviewRetryNote(err)
 	}
+
+	// The handoff reports leave with the findings payload: normalized here so
+	// every note has an id a consuming step can report an outcome for, and
+	// logged so `axi logs --step review` shows what left the findings list.
+	findings.DocReport = normalizeHandoffNotes(findings.DocReport, "doc")
+	findings.LintReport = normalizeHandoffNotes(findings.LintReport, "lint")
+	logHandoffReports(sctx, findings)
 
 	// Phase ownership boundary: drop findings that only claim later pipeline-
 	// owned delivery (push/PR/CI for this run) has not happened yet. Prompt
