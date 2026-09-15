@@ -162,6 +162,31 @@ const (
 	TestVerdictNoSurface    = "no-surface"
 )
 
+// Test evidence-source constants: which path the Test step's diff-class gate
+// took for this run's live-evidence turn.
+//
+// The live-evidence agent is the most expensive thing the pipeline does (a
+// measured ~21 minutes and ~19M tokens per run, 38% of all pipeline tokens),
+// and a decision-only re-run used to re-buy the same evidence. So the step
+// records WHY it has the evidence it has, not only what the evidence says:
+//
+//   - TestEvidenceSourceAgent: the agent drove scenarios in this run.
+//   - TestEvidenceSourceNoProductChange: the run's diff touched no product
+//     file, so there was nothing to drive. The verdict is no-surface and,
+//     because the gate rather than a human reached that conclusion, it does
+//     NOT park (see the steps package's verdictFindings).
+//   - TestEvidenceSourceReused: an earlier run on the same branch recorded a
+//     go verdict and no product file has changed since, so that verdict and
+//     its scenarios stand.
+//
+// An empty value is every payload written before the gate existed, and reads
+// as "the agent ran", which is what those runs did.
+const (
+	TestEvidenceSourceAgent           = "agent"
+	TestEvidenceSourceNoProductChange = "no-product-change"
+	TestEvidenceSourceReused          = "reused"
+)
+
 var (
 	knownScenarioResults = []string{ScenarioResultPass, ScenarioResultFail, ScenarioResultUntested}
 	knownTestVerdicts    = []string{TestVerdictGo, TestVerdictNoGo, TestVerdictInconclusive, TestVerdictNoSurface}
@@ -326,6 +351,13 @@ type Findings struct {
 	Scenarios         []TestScenario     `json:"scenarios,omitempty"`
 	Verdict           string             `json:"verdict,omitempty"`
 	TestedHeadSHA     string             `json:"tested_head_sha,omitempty"`
+	// EvidenceSource and EvidenceReason record which path the Test step's
+	// diff-class gate took (see the TestEvidenceSource* constants) and the
+	// one-line human account of why, including the prior run id and evidence
+	// directory on a reuse. Both are omitempty and absent from every payload
+	// written before the gate existed.
+	EvidenceSource string `json:"evidence_source,omitempty"`
+	EvidenceReason string `json:"evidence_reason,omitempty"`
 	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
@@ -348,6 +380,8 @@ type findingsWire struct {
 	Scenarios           []TestScenario     `json:"scenarios"`
 	Verdict             string             `json:"verdict"`
 	TestedHeadSHA       string             `json:"tested_head_sha"`
+	EvidenceSource      string             `json:"evidence_source"`
+	EvidenceReason      string             `json:"evidence_reason"`
 	UnvalidatedSinceSHA string             `json:"unvalidated_since_sha"`
 	RiskLevel           string             `json:"risk_level"`
 	RiskRationale       string             `json:"risk_rationale"`
@@ -377,6 +411,8 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		Scenarios:           wire.Scenarios,
 		Verdict:             wire.Verdict,
 		TestedHeadSHA:       wire.TestedHeadSHA,
+		EvidenceSource:      wire.EvidenceSource,
+		EvidenceReason:      wire.EvidenceReason,
 		UnvalidatedSinceSHA: wire.UnvalidatedSinceSHA,
 		RiskLevel:           wire.RiskLevel,
 		RiskRationale:       wire.RiskRationale,

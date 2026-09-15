@@ -379,7 +379,7 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		tested := collectTestingDetails(sr, stepRounds)
 		artifacts := collectTestingArtifacts(sr, stepRounds, opts)
 		scenarios := collectTestingScenarios(sr, stepRounds)
-		liveValidation := renderLiveValidationLine(scenarios, collectTestingVerdict(sr, stepRounds))
+		liveValidation := renderLiveValidationLine(scenarios, collectTestingVerdict(sr, stepRounds), collectTestingEvidenceReason(sr, stepRounds))
 		if testingSummary == "" && len(tested) == 0 && len(artifacts) == 0 && liveValidation == "" {
 			return "## Testing\n\n- " + line
 		}
@@ -1567,7 +1567,7 @@ func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.F
 	if sr.StepName != types.StepTest {
 		return
 	}
-	if line := renderLiveValidationLine(findings.Scenarios, findings.Verdict); line != "" {
+	if line := renderLiveValidationLine(findings.Scenarios, findings.Verdict, findings.EvidenceReason); line != "" {
 		b.WriteString("- ")
 		b.WriteString(line)
 		b.WriteString("\n")

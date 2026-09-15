@@ -1,0 +1,102 @@
+package db
+
+import (
+	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+// TestGetBranchTestEvidence_ScopesToOtherRunsOnTheSameBranch: a test verdict
+// is evidence about one branch's head, so the reuse lookup must never see
+// another branch's or another repository's runs, nor the caller's own run.
+func TestGetBranchTestEvidence_ScopesToOtherRunsOnTheSameBranch(t *testing.T) {
+	d := openTestDB(t)
+	repoA, err := d.InsertRepo(t.TempDir(), "https://example.invalid/a", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoB, err := d.InsertRepo(t.TempDir(), "https://example.invalid/b", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed := func(repoID, branch string, step types.StepName, status types.StepStatus, findings *string) *Run {
+		run, err := d.InsertRun(repoID, branch, "head-"+branch, "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sr, err := d.InsertStepResult(run.ID, step)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if findings != nil {
+			if err := d.SetStepFindings(sr.ID, *findings); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := d.CompleteStepWithStatus(sr.ID, status, 0, 1, ""); err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+
+	payload := `{"findings":[],"summary":"","verdict":"go","tested_head_sha":"abc123"}`
+	wanted := seed(repoA.ID, "feature", types.StepTest, types.StepStatusCompleted, &payload)
+	current := seed(repoA.ID, "feature", types.StepTest, types.StepStatusCompleted, &payload)
+	seed(repoA.ID, "other", types.StepTest, types.StepStatusCompleted, &payload)
+	seed(repoB.ID, "feature", types.StepTest, types.StepStatusCompleted, &payload)
+	// A different step, a step that never completed, and a step whose findings
+	// a fix round cleared all have nothing to offer.
+	seed(repoA.ID, "feature", types.StepReview, types.StepStatusCompleted, &payload)
+	seed(repoA.ID, "feature", types.StepTest, types.StepStatusFailed, &payload)
+	seed(repoA.ID, "feature", types.StepTest, types.StepStatusCompleted, nil)
+
+	got, err := d.GetBranchTestEvidence(repoA.ID, "feature", current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("entries = %+v, want only the other same-branch test step", got)
+	}
+	if got[0].RunID != wanted.ID || got[0].FindingsJSON != payload {
+		t.Fatalf("entry = %+v, want run %s with its recorded findings", got[0], wanted.ID)
+	}
+}
+
+// The most recently completed evidence is what a reuse should consider first.
+func TestGetBranchTestEvidence_NewestCompletionFirst(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo(t.TempDir(), "https://example.invalid/a", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, head := range []string{"one", "two", "three"} {
+		run, err := d.InsertRun(repo.ID, "feature", head, "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sr, err := d.InsertStepResult(run.ID, types.StepTest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.SetStepFindings(sr.ID, `{"findings":[],"summary":"","verdict":"go","tested_head_sha":"`+head+`"}`); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.CompleteStep(sr.ID, 0, 1, ""); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, run.ID)
+	}
+
+	got, err := d.GetBranchTestEvidence(repo.ID, "feature", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("entries = %d, want 3", len(got))
+	}
+	if got[0].RunID != ids[2] {
+		t.Fatalf("first entry = %s, want the most recently completed run %s", got[0].RunID, ids[2])
+	}
+}
