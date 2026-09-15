@@ -832,7 +832,7 @@ Whether the Test step consults its **diff-class gate** before invoking the live-
 
 `always` (the default) invokes the live-evidence agent on every run. This is what every installation does without this key.
 
-`diff-class` invokes it only when the run has something new to drive: the diff touches a product file per [`test.non_product_paths`](#testnon_product_paths), or no earlier run on the same branch already earned a `go` verdict at an unchanged product state. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the exact rules, and note that the gate skips the evidence agent only - the configured [`commands.test`](#commandstest) is outside it and runs on every run either way.
+`diff-class` invokes it only when the run has something new to drive: the diff touches a product file per [`test.non_product_paths`](#testnon_product_paths), or this branch's newest recorded verdict is not a `go` that already covers this head's product files under the same user intent. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the exact rules, and note that the gate skips the evidence agent only - the configured [`commands.test`](#commandstest) is outside it and runs on every run either way.
 
 Reach for `diff-class` when the evidence turn's bill outweighs re-deriving evidence you already have. On this repository's own pipeline it measured ~21 minutes and ~19M tokens per run - 38% of all pipeline tokens - and a decision-only re-run of a branch re-bought it in full. It is opt-in rather than the default because it changes which runs get live validation at all: a version bump must not quietly stop validating a repository whose layout the default classification reads wrongly. Check that `test.non_product_paths` matches your tree before turning it on.
 
