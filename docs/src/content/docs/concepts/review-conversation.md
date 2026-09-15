@@ -43,6 +43,13 @@ story: a crash mid-write loses at most the trailing line, a reader can `tail -f`
 either file, and no writer ever needs a lock on something another process is
 reading. `internal/reviewqa` owns the shape and is the only parser.
 
+Because the files live in the run's evidence directory, an operator who has
+opted into [`test.evidence.store_in_repo`](/no-mistakes/reference/repo-config/)
+publishes them along with the run's other evidence. That is the same content the
+PR body already records, so it is deliberate rather than incidental - but note
+that the copy on the evidence branch is the raw text, while the PR body's copy
+goes through the home-path redaction every published body does.
+
 ### questions.ndjson
 
 The reviewer appends one line per event, using the file tools it already has. No
