@@ -23,6 +23,13 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 	lintCmd := sctx.Config.Commands.Lint
 
+	// The review step's lint report: the deterministic cases it recorded
+	// instead of parking the run. Every path through this step carries it,
+	// including the one where the configured command passes - the report
+	// exists precisely for what that command does not cover.
+	_, lintNotes := reviewHandoffReports(sctx)
+	notesSection := handoffNotesPromptSection(lintReportPromptHeading, lintReportPromptDuty, lintNotes)
+
 	if lintCmd == "" {
 		// The combined document+lint housekeeping pass already performed the
 		// agent-driven lint duty for this round; consume its result instead
@@ -61,7 +68,7 @@ Rules:
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
-			reassessHistory,
+			reassessHistory+notesSection,
 		)
 		if sctx.PreviousFindings != "" {
 			prompt += `
@@ -99,6 +106,7 @@ Previous lint findings to address:
 			return nil, err
 		}
 
+		findings.AppliedNotes = reconcileHandoffOutcomes(sctx, lintNotes, findings.AppliedNotes)
 		needsApproval := hasBlockingFindings(findings.Items)
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{
@@ -132,7 +140,7 @@ Rules:
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
-			historySection,
+			historySection+notesSection,
 		)
 		if sctx.PreviousFindings != "" {
 			fixPrompt += `
@@ -182,8 +190,98 @@ Previous lint findings to address:
 		}, nil
 	}
 
+	if len(lintNotes) > 0 {
+		sctx.Log(fmt.Sprintf("lint passed; acting on %d lint note(s) from the review step", len(lintNotes)))
+		return s.runReportFixer(sctx, baseSHA, lintNotes, notesSection, fixSummary)
+	}
+
 	sctx.Log("lint passed")
 	return &pipeline.StepOutcome{FixSummary: fixSummary}, nil
+}
+
+// runReportFixer spends one agent pass on the review step's lint report after
+// the configured lint command has already passed.
+//
+// That combination is the whole reason the report exists: a configured
+// `commands.lint` is a fixed set of checks, and the reviewer's notes are the
+// deterministic cases OUTSIDE it - a type check the command does not run, a
+// checker the repository has but does not wire into lint. Reporting them as
+// findings would have parked the run and bought a cold re-review; fixing them
+// here costs one pass whose output nobody re-reviews.
+//
+// It is one pass, not a loop: the step has no round budget of its own, and a
+// note the agent cannot resolve comes back as an ordinary lint finding under
+// the same gate semantics as every other lint result.
+func (s *LintStep) runReportFixer(sctx *pipeline.StepContext, baseSHA string, lintNotes []types.HandoffNote, notesSection, fixSummary string) (*pipeline.StepOutcome, error) {
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
+	prompt := fmt.Sprintf(
+		`The review step recorded lint, type-check, and formatting observations for this change instead of blocking the run. The configured lint command already passes, so these are the deterministic issues it does not cover. Confirm and fix them.
+
+Context:
+- branch: %s
+- base commit: %s
+- target commit: %s
+- configured lint command (already passing): %s
+
+Task:
+- For each note, run the relevant checker yourself to confirm it, apply the safe mechanical fix, and re-run that checker.
+- Report only notes you could not resolve, or that turned out to be wrong, as structured findings.
+- If you fixed everything, return an empty findings array.
+
+Rules:
+- Fixes must be safe, mechanical, and behavior-preserving. Do not change functional behavior or test assertions.
+- Do not run tests or broader behavioral validation, and do not re-run the whole repository lint suite.
+- Do not report issues you already fixed.
+- The summary must be one concise sentence fragment suitable for a git commit subject.
+- Keep the summary under 10 words.%s`,
+		sctx.Run.Branch,
+		baseSHA,
+		sctx.Run.HeadSHA,
+		sctx.Config.Commands.Lint,
+		historySection+notesSection,
+	)
+
+	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
+		Prompt:     fixerPrompt(prompt),
+		CWD:        sctx.WorkDir,
+		JSONSchema: findingsSchema,
+		OnChunk:    sctx.LogChunk,
+		Purpose:    "lint",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agent lint report: %w", err)
+	}
+
+	var findings Findings
+	if result.Output == nil {
+		return nil, errors.New("lint analyzer returned no structured findings")
+	}
+	if err := unmarshalRequiredFindings(result.Output, &findings, true); err != nil {
+		return nil, fmt.Errorf("validate lint analyzer findings: %w", err)
+	}
+	summary, err := extractCommitSummary(result)
+	if err != nil {
+		if errors.Is(err, errRejectedCommitSummary) {
+			return nil, fmt.Errorf("validate lint summary: %w", err)
+		}
+		sctx.Log(fmt.Sprintf("warning: could not parse lint summary: %v", err))
+	}
+	committed, err := commitAgentFixesWithResult(sctx, s.Name(), summary, "fix lint report notes")
+	if err != nil {
+		return nil, err
+	}
+
+	findings.AppliedNotes = reconcileHandoffOutcomes(sctx, lintNotes, findings.AppliedNotes)
+	findingsJSON, _ := json.Marshal(findings)
+	if fixSummary == "" {
+		fixSummary = fixResultSummary(committed)
+	}
+	return &pipeline.StepOutcome{
+		NeedsApproval: hasBlockingFindings(findings.Items),
+		AutoFixable:   false,
+		Findings:      string(findingsJSON),
+		FixSummary:    fixSummary,
+	}, nil
 }
 
 // lintOutcomeFromHousekeeping reports the lint findings the combined

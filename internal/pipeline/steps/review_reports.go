@@ -189,3 +189,37 @@ func handoffOutcomeNote(outcomes []types.HandoffOutcome, id string) (types.Hando
 	}
 	return types.HandoffOutcome{}, false
 }
+
+// reconcileHandoffOutcomes pairs the notes a step received with the outcomes
+// it reported, so a note the step never mentioned is recorded as unaddressed
+// rather than silently dropped. Only notes that were actually handed over
+// produce an entry: an outcome for an unknown id is ignored, since the step
+// cannot have applied a note nobody sent it.
+func reconcileHandoffOutcomes(sctx *pipeline.StepContext, notes []types.HandoffNote, reported []types.HandoffOutcome) []types.HandoffOutcome {
+	if len(notes) == 0 {
+		return nil
+	}
+	out := make([]types.HandoffOutcome, 0, len(notes))
+	unaddressed := 0
+	for _, note := range notes {
+		outcome, ok := handoffOutcomeNote(reported, note.ID)
+		if !ok {
+			unaddressed++
+			out = append(out, types.HandoffOutcome{ID: note.ID, Applied: false, Note: "the step reported no outcome for this note"})
+			continue
+		}
+		outcome.ID = note.ID
+		outcome.Note = sanitizePromptMultilineText(outcome.Note)
+		out = append(out, outcome)
+	}
+	applied := 0
+	for _, o := range out {
+		if o.Applied {
+			applied++
+		}
+	}
+	if sctx != nil && sctx.Log != nil {
+		sctx.Log(fmt.Sprintf("handoff notes: %d of %d applied, %d unreported", applied, len(out), unaddressed))
+	}
+	return out
+}

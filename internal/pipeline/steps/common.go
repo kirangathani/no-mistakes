@@ -227,6 +227,19 @@ var findingsSchema = json.RawMessage(`{
 		},
 		"testing_summary": {
 			"type": "string"
+		},
+		"applied_notes": {
+			"type": "array",
+			"description": "one entry per handoff note you received from the review step: whether you applied it, and if not, why not",
+			"items": {
+				"type": "object",
+				"properties": {
+					"id": {"type": "string", "description": "the note id as given"},
+					"applied": {"type": "boolean"},
+					"note": {"type": "string", "description": "what you changed, or why the note needed no change"}
+				},
+				"required": ["id", "applied"]
+			}
 		}
 	},
 	"required": ["findings", "summary"]
