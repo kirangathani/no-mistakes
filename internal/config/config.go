@@ -1149,7 +1149,7 @@ ci:
   # Whether EVERY CI repair must re-pass the whole pipeline before it is
   # published, or only the ones whose continuity with the reviewed head cannot
   # be proven. Defaults to false: a repair that descends from the reviewed head
-  # is published through the same guarded force-push path the Push step uses and
+  # is published through the same guarded push path the Push step uses and
   # CI keeps monitoring, so one repair costs one agent round. A repair that
   # cannot show that ancestry revalidates from Review anyway - a merge-conflict
   # repair always does, because rebasing rewrites the head. Set true to restart
