@@ -133,15 +133,17 @@ func fixCalls(calls []agent.RunOpts) []agent.RunOpts {
 // TestReviewLoop_IndependentReviewTurnsOneFixerSession drives the real review
 // step through the executor's auto-fix loop for multiple rounds and proves:
 // every review turn (the initial review and every post-fix rereview) runs
-// session-free, N fix rounds share ONE durable fixer session, the review
-// turns never receive the fixer's identity, and every review round still asks
-// for a full review pass of the branch.
+// cold, N fix rounds share ONE durable fixer session, the review turns never
+// receive the fixer's identity, and every review round still asks for a full
+// review pass of the branch.
 //
-// Review turns are deliberately session-free: round N's fixes implement round
-// N-1's review findings, so resuming any prior review turn's session would
-// seat the prescriber of those fixes as their certifier. The cross-round
-// context a rereview legitimately needs travels in the explicit sanitized
-// round-history prompt section instead.
+// No review ROUND inherits another round's session: round N's fixes implement
+// round N-1's review findings, so resuming the prescriber's session would seat
+// it as their certifier. The initial review may START a reviewer session - it
+// is the asking turn of a review pass, whose finalize turn resumes it - but the
+// review step Forgets that identity before any fix round, so every rereview
+// here is cold. The cross-round context a rereview legitimately needs travels
+// in the explicit sanitized round-history prompt section instead.
 func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 	reviewRound := 0
 	mock := &sessionMockAgent{}
@@ -179,19 +181,24 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 		t.Fatalf("expected 2 fix rounds, got %d", len(fixes))
 	}
 
-	// Every review turn is session-free: no identity to start, none resumed.
-	for i, call := range reviews {
+	// The initial review starts a reviewer session for its own pass; no review
+	// turn ever RESUMES one here, because each rereview follows a fix round
+	// whose entry dropped the identity.
+	if reviews[0].Session == nil || reviews[0].Session.ID != "" {
+		t.Fatalf("initial review must start a fresh reviewer session, got %+v", reviews[0].Session)
+	}
+	for i, call := range reviews[1:] {
 		if call.Session != nil {
-			t.Fatalf("review round %d must run session-free, got session %+v", i+1, call.Session)
+			t.Fatalf("rereview after fix round %d must be cold, got session %+v", i+1, call.Session)
 		}
 	}
 
 	// One durable fixer session: started on the first fix turn, resumed on
-	// the second.
+	// the second. Its id is sess-2 because the initial review minted sess-1.
 	if fixes[0].Session == nil || fixes[0].Session.ID != "" {
 		t.Fatalf("first fix must start the fixer session, got %+v", fixes[0].Session)
 	}
-	fixerID := "sess-1"
+	fixerID := "sess-2"
 	if fixes[1].Session == nil || fixes[1].Session.ID != fixerID {
 		t.Fatalf("second fix must resume %s, got %+v", fixerID, fixes[1].Session)
 	}
@@ -207,14 +214,15 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 		}
 	}
 
-	// The persisted resume metadata is the minimum, and only the fixer role
-	// has any: review turns never mint a durable identity.
+	// The persisted resume metadata is the minimum, and after a fix round only
+	// the fixer role has any: entering the fix round deleted the reviewer row,
+	// so no stale reviewer identity is left behind for a later turn to resume.
 	sessions, err := database.GetRunAgentSessions(run.ID)
 	if err != nil {
 		t.Fatalf("get sessions: %v", err)
 	}
 	if len(sessions) != 1 {
-		t.Fatalf("expected 1 persisted role session (fixer), got %d", len(sessions))
+		t.Fatalf("expected 1 persisted role session (fixer), got %d: %+v", len(sessions), sessions)
 	}
 	if sessions[0].Role != string(pipeline.SessionRoleFixer) || sessions[0].SessionID == "" || sessions[0].Agent != "session-mock" {
 		t.Fatalf("unexpected persisted session: %+v", sessions[0])

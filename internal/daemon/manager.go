@@ -26,6 +26,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
@@ -1731,6 +1732,72 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 	}
 
 	return exec.RespondWithOverrides(step, action, findingIDs, instructions, addedFindings, approvalReason)
+}
+
+// HandleAnswerReviewQuestion records one operator answer to a question the
+// run's reviewer asked, and releases the review gate once nothing is left
+// open.
+//
+// The two outcomes are both correct and both expected:
+//
+//   - the reviewer is still working (no gate parked yet). The answer is
+//     durably appended and the reviewer reads it at its next checkpoint, which
+//     is the whole point of emitting questions mid-turn: an early answer can
+//     redirect the pass instead of arriving after the effort is spent.
+//   - the reviewer has parked in waiting-on-answers. Once this answer closes
+//     the last open question, types.ActionAnswer resumes the reviewer's own
+//     session with the answers. That is the push the captain required: nothing
+//     polls, and the reviewer receives a message it did not ask for.
+//
+// The write happens before the release decision, so a failure to resume never
+// loses the answer - the next answer, or a recovered gate, finds it on disk.
+func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answeredBy string) (*ipc.AnswerReviewQuestionResult, error) {
+	questionID = strings.TrimSpace(questionID)
+	answer = strings.TrimSpace(answer)
+	if questionID == "" || answer == "" {
+		return nil, fmt.Errorf("answering a review question needs a question id and an answer")
+	}
+
+	m.mu.Lock()
+	exec, ok := m.executors[runID]
+	m.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("no active executor for run %s", runID)
+	}
+	dir := exec.ReviewConversationDir(runID)
+	if dir == "" {
+		return nil, fmt.Errorf("run %s has no review conversation directory", runID)
+	}
+	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{
+		ID:         questionID,
+		Answer:     answer,
+		AnsweredBy: strings.TrimSpace(answeredBy),
+	}); err != nil {
+		return nil, err
+	}
+
+	conv, err := reviewqa.Load(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read review conversation after recording the answer: %w", err)
+	}
+	open := conv.Open()
+	result := &ipc.AnswerReviewQuestionResult{OK: true, Open: len(open)}
+	for _, e := range open {
+		result.OpenIDs = append(result.OpenIDs, e.ID)
+	}
+	if len(open) > 0 {
+		result.Note = "recorded; the reviewer still has open questions"
+		return result, nil
+	}
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		// Not an error for the caller: the answer is recorded either way, and
+		// "no step awaiting approval" is the ordinary mid-turn case.
+		result.Note = fmt.Sprintf("recorded; the review gate was not released (%v)", err)
+		return result, nil
+	}
+	result.Resumed = true
+	result.Note = "recorded; every question is answered and the reviewer was resumed"
+	return result, nil
 }
 
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent
