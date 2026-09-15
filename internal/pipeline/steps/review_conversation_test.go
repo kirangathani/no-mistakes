@@ -247,7 +247,11 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 // the review.
 func TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	// Anchored on the real clock, not a fixed date: reviewAgentContext derives
+	// an ABSOLUTE deadline from this value, so a hardcoded date makes the test
+	// pass until wall-clock time overtakes it and fail every run afterwards.
+	// Every assertion below is relative, so a relative base is equivalent.
+	clock := time.Now()
 	var deadlines []time.Time
 	var convDir string
 	turn := 0

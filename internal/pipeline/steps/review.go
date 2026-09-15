@@ -370,11 +370,20 @@ Risk assessment (after listing all findings):
 		// asked; Forget above already dropped any stale one.
 		sessionRole = pipeline.SessionRoleReviewer
 	}
-	if resumingAnswers {
+	// The answers ride the prompt whenever a finalize turn runs, including the
+	// cold one that replays a fix round's rereview. Gating this on the session
+	// would mean answering a question a rereview asked did nothing at all and
+	// the step re-parked on the same question forever, because a fix round's
+	// rereview is deliberately session-free.
+	if sctx.FinalizingAnswers && convDir != "" {
 		conv := loadReviewConversation(sctx, convDir)
 		if answers := reviewAnswersPromptSection(conv); answers != "" {
 			turnPrompt = prompt + answers
-			sctx.Log(fmt.Sprintf("resuming the review with %d answered question(s)", len(conv.Answered())))
+			how := "resuming"
+			if !resumingAnswers {
+				how = "replaying"
+			}
+			sctx.Log(fmt.Sprintf("%s the review with %d answered question(s)", how, len(conv.Answered())))
 		}
 	}
 	opts := agent.RunOpts{
