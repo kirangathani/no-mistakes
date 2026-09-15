@@ -201,6 +201,7 @@ func runAxiHome(cmd *cobra.Command) error {
 	}
 
 	gated := false
+	gatedOnAnswers := false
 	hasBranchSync := false
 	if currentActive != nil {
 		steps, _ := env.d.GetStepsByRun(currentActive.ID)
@@ -213,6 +214,7 @@ func runAxiHome(cmd *cobra.Command) error {
 		}
 		if gate, ok := rv.awaitingStep(); ok {
 			gated = true
+			gatedOnAnswers = len(reviewQuestionRows(gate.FindingsJSON)) > 0
 			fields = append(fields, gateFields(gate)...)
 		}
 	} else if otherActive != nil {
@@ -238,6 +240,10 @@ func runAxiHome(cmd *cobra.Command) error {
 		if otherActive != nil {
 			help = append(help, fmt.Sprintf("Another active run is on %s; leave it alone unless you are working on that branch", otherActive.Branch))
 		}
+	case gatedOnAnswers:
+		// A review parked on its reviewer's own questions wants an answer, not
+		// a verdict: approving would discard the pass it paused.
+		help = append(help, "Run `no-mistakes axi answer --question <id> --answer \"<one of its options>\"` for each question in the gate; the reviewer resumes when none are open")
 	case gated:
 		help = append(help, "Run `no-mistakes axi respond --action approve` to clear the current gate")
 	default:
