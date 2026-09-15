@@ -31,11 +31,18 @@ type ReviewAnswer struct {
 
 // RecordReviewAnswer persists one answered review question for a branch.
 //
-// The write is an upsert keyed by (repo, branch, question): a corrected answer
-// replaces the earlier one rather than accumulating, which matches the file
-// protocol where the last answers.ndjson line for an id wins. run_id records
-// which run's reviewer asked it and is deliberately not part of the key - the
-// answer is about the branch, and a later run must not re-ask it.
+// The write is an upsert keyed by (repo, branch, question, run): within one run
+// a corrected answer replaces the earlier one rather than accumulating, which
+// matches the file protocol where the last answers.ndjson line for an id wins.
+//
+// run_id is part of the key because question ids are chosen by the agent and
+// are unique only by accident. Without it, run B's "q1" overwrote run A's
+// settled "q1" on the same branch, so the settled-questions section lost A's
+// decision and the reviewer re-asked it - and the surviving row paired the new
+// question text with the old answer, recording an exchange that never
+// happened. The answer is still about the branch and still reaches every later
+// cold reviewer; what is per-run is the identity of the question asked, not the
+// scope of its answer.
 func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 	if a.RepoID == "" || a.Branch == "" || a.QuestionID == "" {
 		return fmt.Errorf("record review answer: repo, branch and question id are required")
@@ -55,8 +62,7 @@ func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 		    (repo_id, branch, question_id, run_id, question, options_json, file, line,
 		     answer, answered_by, answered_at, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (repo_id, branch, question_id) DO UPDATE SET
-		    run_id = excluded.run_id,
+		 ON CONFLICT (repo_id, branch, question_id, run_id) DO UPDATE SET
 		    question = excluded.question,
 		    options_json = excluded.options_json,
 		    file = excluded.file,

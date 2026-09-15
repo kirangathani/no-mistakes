@@ -189,8 +189,11 @@ CREATE TABLE IF NOT EXISTS intent_cache (
 -- next COLD reviewer - in this run or any later one - reads what is already
 -- settled. A mid-turn answer is not a gate response, so it cannot ride the
 -- step_rounds decision channel; nothing deletes these rows, for the same
--- reason nothing deletes a branch decision. PRIMARY KEY per branch+question:
--- a corrected answer replaces the earlier one.
+-- reason nothing deletes a branch decision. PRIMARY KEY per
+-- branch+question+run: a correction within the same run replaces its earlier
+-- answer, while two runs that both happen to use the question id "q1" - ids
+-- are chosen by the agent and unique only by accident - keep their own rows
+-- instead of one overwriting the other's settled decision.
 CREATE TABLE IF NOT EXISTS review_questions (
     repo_id      TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     branch       TEXT NOT NULL,
@@ -205,7 +208,7 @@ CREATE TABLE IF NOT EXISTS review_questions (
     answered_at  TEXT,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL,
-    PRIMARY KEY (repo_id, branch, question_id)
+    PRIMARY KEY (repo_id, branch, question_id, run_id)
 );
 
 -- Per-branch range of pipeline-authored commits whose re-review did not

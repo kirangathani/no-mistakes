@@ -50,9 +50,13 @@ const (
 // Bounds on what is read from either file. They exist because every loaded
 // entry is rendered into an agent prompt and into `axi` output, so an agent
 // that appends in a loop must degrade to a truncated conversation rather than
-// an unbounded one. maxLines counts accepted lines; a longer file keeps its
-// NEWEST lines, because a later line supersedes an earlier one with the same
-// id.
+// an unbounded one.
+//
+// The two bounds behave oppositely and both matter. maxLines counts accepted
+// lines and keeps the NEWEST of them, because a later line supersedes an
+// earlier one with the same id. maxFileBytes stops the scan instead, so a file
+// over that size keeps its LEADING bytes and a trailing retraction or answer
+// may not be read at all.
 const (
 	maxLines     = 2000
 	maxFileBytes = 4 << 20 // 4 MiB
@@ -160,6 +164,25 @@ func Load(dir string) (Conversation, error) {
 
 	order := make([]string, 0, len(questionLines))
 	byID := make(map[string]*Entry, len(questionLines))
+	// An id can be ASKED more than once: ids are chosen by the agent (the
+	// protocol's worked example is literally "q1"), the conversation directory
+	// is per RUN, and a cold rereview in a fix round is shown only the OPEN
+	// questions - so it reuses "q1" for a genuinely different question. An
+	// answer written before that re-ask answered the OLD question, and letting
+	// it settle the new one meant the new question arrived pre-answered:
+	// Open() was empty, no finding was emitted, the gate never parked, and a
+	// major question reached nobody.
+	//
+	// So a question is settled only once it has AS MANY answers as it has been
+	// asked. Counting is deliberate rather than comparing timestamps: the two
+	// files are appended independently, asked_at/answered_at are optional and
+	// written by whoever appends the line, and second-granularity RFC3339 from
+	// two writers cannot order a fast exchange. Counting needs nothing but the
+	// lines themselves. It fails toward OPEN - a re-ask asks again rather than
+	// assuming the previous answer still applies - which is the safe direction
+	// here and also the behaviour under a byte-truncated answers file.
+	asks := make(map[string]int, len(questionLines))
+	answersByID := make(map[string][]Answer, len(answerLines))
 	for _, line := range questionLines {
 		var q Question
 		if err := json.Unmarshal([]byte(line), &q); err != nil {
@@ -198,6 +221,7 @@ func Load(dir string) (Conversation, error) {
 			conv.Notes = append(conv.Notes, fmt.Sprintf("dropped minor-weight question %q; the reviewer decides minor questions itself", q.ID))
 			continue
 		}
+		asks[q.ID]++
 		if entry, ok := byID[q.ID]; ok {
 			// A later question line for the same id is an edit, not a
 			// duplicate. It also revives a retracted question, because
@@ -222,14 +246,24 @@ func Load(dir string) (Conversation, error) {
 			conv.Notes = append(conv.Notes, "skipped an answers.ndjson line with no id or no answer")
 			continue
 		}
-		entry, ok := byID[a.ID]
-		if !ok {
+		if _, ok := byID[a.ID]; !ok {
 			// The writer may be racing a question it has not read yet, or
 			// answering something the reviewer withdrew. Recorded, ignored.
 			conv.Notes = append(conv.Notes, fmt.Sprintf("answer for unknown question %q ignored", a.ID))
 			continue
 		}
-		answer := a
+		answersByID[a.ID] = append(answersByID[a.ID], a)
+	}
+
+	// Attach the newest answer only to a question that has been answered at
+	// least as many times as it was asked; see the asks comment above. A
+	// question left short of that stays OPEN and parks the gate again.
+	for id, entry := range byID {
+		answers := answersByID[id]
+		if len(answers) == 0 || len(answers) < asks[id] {
+			continue
+		}
+		answer := answers[len(answers)-1]
 		entry.Answer = &answer
 	}
 
@@ -244,8 +278,9 @@ func Load(dir string) (Conversation, error) {
 }
 
 // AppendQuestion appends one question or retraction, creating the directory on
-// first use. It is the writer the pipeline's own tests and any future tool use;
-// the reviewer agent writes the same lines with its own file tools.
+// first use. It is the writer used by the pipeline's own tests and by any
+// future tool use; the reviewer agent writes the same lines with its own file
+// tools.
 func AppendQuestion(dir string, q Question) error {
 	if strings.TrimSpace(q.ID) == "" {
 		return errors.New("review question requires an id")

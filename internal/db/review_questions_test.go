@@ -56,11 +56,12 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 		t.Fatalf("round-trip lost fields: %#v", got)
 	}
 
-	// A correction replaces rather than accumulating, matching the file
-	// protocol where the last answers.ndjson line for an id wins.
+	// A correction WITHIN THE SAME RUN replaces rather than accumulating,
+	// matching the file protocol where the last answers.ndjson line for an id
+	// wins.
 	if err := d.RecordReviewAnswer(ReviewAnswer{
-		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: second.ID,
-		Question: "keep /v1?", Answer: "drop it", AnsweredBy: "firstmate",
+		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: first.ID,
+		Question: "keep /v1?", Answer: "keep it unconditionally", AnsweredBy: "captain",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +69,37 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(answers) != 1 || answers[0].Answer != "drop it" || answers[0].RunID != second.ID {
-		t.Fatalf("correction = %#v", answers)
+	if len(answers) != 1 || answers[0].Answer != "keep it unconditionally" {
+		t.Fatalf("same-run correction did not replace: %#v", answers)
+	}
+
+	// A DIFFERENT run reusing the same question id keeps its own row. Ids are
+	// chosen by the agent and unique only by accident, so overwriting here lost
+	// the first run's settled decision and left the surviving row pairing the
+	// new question text with the old answer - a record of an exchange that
+	// never happened.
+	if err := d.RecordReviewAnswer(ReviewAnswer{
+		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: second.ID,
+		Question: "should /v2 answer too?", Answer: "no", AnsweredBy: "firstmate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	answers, _, err = d.GetBranchReviewAnswers(repo.ID, "feature", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(answers) != 2 {
+		t.Fatalf("a second run's reused question id overwrote the first: %#v", answers)
+	}
+	byRun := map[string]ReviewAnswer{}
+	for _, a := range answers {
+		byRun[a.RunID] = a
+	}
+	if got := byRun[first.ID]; got.Answer != "keep it unconditionally" || got.Question != "keep /v1?" {
+		t.Fatalf("the first run's settled answer was lost or re-paired: %#v", got)
+	}
+	if got := byRun[second.ID]; got.Answer != "no" || got.Question != "should /v2 answer too?" {
+		t.Fatalf("the second run's answer is wrong: %#v", got)
 	}
 
 	// Another branch's conversation is not visible.
@@ -83,7 +113,7 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(answers) != 1 {
+	if len(answers) != 2 {
 		t.Fatalf("branch scoping broken: %#v", answers)
 	}
 }

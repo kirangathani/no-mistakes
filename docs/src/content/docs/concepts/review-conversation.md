@@ -70,15 +70,29 @@ and a per-adapter support matrix for a capability the agent already has.
 {"id":"q1","kind":"retract","reason":"answered by the migration note in docs/api.md","at":"2026-09-15T13:19:02Z"}
 ```
 
-- `id` is the reviewer's own stable handle for the question. A later line with
-  the same `id` supersedes the earlier one, so a re-ask is an edit, not a
-  duplicate.
+- `id` is the reviewer's own handle for the question. A later line with the same
+  `id` supersedes the earlier one, so a re-ask is an edit, not a duplicate.
+
+  An `id` is chosen by the reviewer and is only unique by accident - every
+  review turn of a run appends to the same file, and a cold rereview in a fix
+  round is shown only the questions still open, so it can reuse `q1` for a
+  genuinely different question. A question is therefore settled only once it has
+  **as many answers as it has been asked**: a re-ask re-opens the entry and
+  parks the gate again rather than inheriting the previous answer. That is
+  counted from the lines themselves rather than compared by timestamp, because
+  the two files are appended independently and `asked_at`/`answered_at` are
+  optional. The same reason makes the per-branch answer store keyed by run as
+  well as by question id, so two runs that both use `q1` keep their own settled
+  decisions instead of one overwriting the other's.
 - `kind` is `question` or `retract`. A retracted question is closed: it never
-  blocks the step and never needs an answer.
-- `options` carries the multiple-choice alternatives. It is required for an
-  emitted question, because a question reaches the captain in the same
+  blocks the step and never needs an answer. Re-asking it revives it, and it
+  comes back open rather than carrying whatever answer preceded the retraction.
+- `options` carries the multiple-choice alternatives. The reviewer is required
+  to supply 2-4 of them, because a question reaches the captain in the same
   multiple-choice form he already receives - an open-ended question is a worse
-  question, not a shorter one.
+  question, not a shorter one. Nothing validates that, though: a question that
+  arrives with no options is still accepted and still parks the gate, it just
+  reaches the operator open-ended.
 - `weight` is `major` (escalate) - see [Routing by weight](#routing-by-weight).
   Minor questions are never emitted at all.
 
