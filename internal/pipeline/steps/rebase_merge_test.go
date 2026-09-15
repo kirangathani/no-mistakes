@@ -440,3 +440,48 @@ func TestRebaseStep_MergeStrategyFollowUpCommitAfterTheMergeIsAccepted(t *testin
 		t.Fatalf("reviewed head %s is not in %s", f.headSHA, head)
 	}
 }
+
+// An agent can also abandon the merge and then commit something else entirely.
+// That keeps the reviewed head in the history and does move HEAD, so both the
+// moved-head and reviewed-head-ancestor conditions pass; only the target's own
+// ancestry catches it. Without that check the run would carry on having never
+// integrated the moved base.
+func TestRebaseStep_MergeStrategyUnrelatedCommitInsteadOfMergeFails(t *testing.T) {
+	t.Parallel()
+	f := newMergeFixture(t, true)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			fixtureGit(t, f.dir, "merge", "--abort")
+			writeFixtureFile(t, f.dir, "unrelated.txt", "not the merge\n")
+			fixtureGit(t, f.dir, "add", "unrelated.txt")
+			fixtureGit(t, f.dir, "commit", "-m", "unrelated work")
+			return &agent.Result{Output: json.RawMessage(`{"summary":"committed something else"}`)}, nil
+		},
+	}
+
+	sctx := f.context(t, ag, config.RebaseStrategyMerge)
+	sctx.Fixing = true
+
+	_, err := (&RebaseStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected an error when the agent committed instead of merging, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not merge") {
+		t.Fatalf("error = %v, want it to name the missing merge", err)
+	}
+
+	// Fixture integrity: this head must be one ONLY the target-ancestry check
+	// can reject, or the test proves nothing about that check.
+	head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+	if head == f.headSHA {
+		t.Fatal("fixture left HEAD unmoved; the moved-head check would reject this instead")
+	}
+	if !isAncestor(context.Background(), f.dir, f.headSHA, head) {
+		t.Fatal("fixture dropped the reviewed head; the reviewed-head check would reject this instead")
+	}
+	if isAncestor(context.Background(), f.dir, f.mainSHA, head) {
+		t.Fatal("fixture integrated the target after all; the test proves nothing")
+	}
+}
