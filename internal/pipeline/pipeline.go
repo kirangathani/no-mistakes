@@ -80,13 +80,12 @@ type StepContext struct {
 	PriorBranchDecisions          []*db.BranchDecisionRound
 	PriorBranchDecisionsTruncated bool
 	// PreviousRunReviewRounds are the review rounds of the most recent OTHER
-	// run on this branch, and PreviousRunID names it. They are bound on the
-	// review step so a run that superseded a parked one - which is what an
-	// author's own fix push does - still carries what the previous round found
-	// and what was already answered. The code itself is still reviewed cold.
-	// Nil when there is no such run, or when the uncertified-range channel
-	// already carries the same run's rounds.
-	PreviousRunID           string
+	// run on this branch. They are bound on the review step so a run that
+	// superseded a parked one - which is what an author's own fix push does -
+	// still carries what the previous round found and what was already
+	// answered. The code itself is still reviewed cold. Nil when there is no
+	// such run, or when the uncertified-range channel already carries the same
+	// run's rounds.
 	PreviousRunReviewRounds []*db.StepRound
 	// Sessions manages the run's durable review-loop sessions: the fixer's,
 	// which spans its fix turns, and the reviewer's, which spans one review

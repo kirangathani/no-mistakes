@@ -134,54 +134,6 @@ func (d *DB) GetBranchReviewAnswers(repoID, branch string, limit int) ([]ReviewA
 	return answers, truncated, nil
 }
 
-// GetRunReviewAnswers returns the answers recorded by one run's reviewer, in
-// the order they were answered. The PR body uses it to record the review
-// conversation of the run that is being published.
-func (d *DB) GetRunReviewAnswers(runID string) ([]ReviewAnswer, error) {
-	rows, err := d.sql.Query(
-		`SELECT repo_id, branch, question_id, run_id, question, options_json, file, line,
-		        answer, answered_by, answered_at, updated_at
-		   FROM review_questions
-		  WHERE run_id = ?
-		  ORDER BY updated_at ASC, question_id ASC`,
-		runID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get run review answers: %w", err)
-	}
-	defer rows.Close()
-
-	var answers []ReviewAnswer
-	for rows.Next() {
-		var a ReviewAnswer
-		var optionsJSON, file, answeredBy, answeredAt *string
-		var line *int64
-		if err := rows.Scan(
-			&a.RepoID, &a.Branch, &a.QuestionID, &a.RunID, &a.Question, &optionsJSON,
-			&file, &line, &a.Answer, &answeredBy, &answeredAt, &a.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan run review answer: %w", err)
-		}
-		if optionsJSON != nil {
-			_ = json.Unmarshal([]byte(*optionsJSON), &a.Options)
-		}
-		if file != nil {
-			a.File = *file
-		}
-		if line != nil {
-			a.Line = int(*line)
-		}
-		if answeredBy != nil {
-			a.AnsweredBy = *answeredBy
-		}
-		if answeredAt != nil {
-			a.AnsweredAt = *answeredAt
-		}
-		answers = append(answers, a)
-	}
-	return answers, rows.Err()
-}
-
 func nullableText(s string) any {
 	if s == "" {
 		return nil

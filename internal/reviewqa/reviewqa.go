@@ -59,12 +59,6 @@ const (
 	maxLineBytes = 64 << 10
 )
 
-// ErrTruncated reports that a file exceeded maxFileBytes and only its leading
-// bytes were parsed. The conversation is still returned: a partially readable
-// conversation is more useful than none, and the caller decides whether to say
-// so.
-var ErrTruncated = errors.New("review conversation file truncated")
-
 // Question is one line of questions.ndjson. A KindRetract line carries only
 // ID, Kind, Reason and At.
 type Question struct {

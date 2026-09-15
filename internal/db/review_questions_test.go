@@ -115,37 +115,6 @@ func TestGetBranchReviewAnswersBoundsAndReportsTruncation(t *testing.T) {
 	}
 }
 
-func TestGetRunReviewAnswersIsScopedToOneRun(t *testing.T) {
-	d := openTestDB(t)
-	repo, err := d.InsertRepo("/work/repo", "https://example.com/repo.git", "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := d.InsertRun(repo.ID, "feature", "head-1", "base")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := d.InsertRun(repo.ID, "feature", "head-2", "base")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, spec := range []struct{ id, runID string }{{"q1", a.ID}, {"q2", b.ID}} {
-		if err := d.RecordReviewAnswer(ReviewAnswer{
-			RepoID: repo.ID, Branch: "feature", QuestionID: spec.id, RunID: spec.runID,
-			Question: "q", Answer: "a",
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got, err := d.GetRunReviewAnswers(b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].QuestionID != "q2" {
-		t.Fatalf("run answers = %#v", got)
-	}
-}
-
 func TestRecordReviewAnswerRequiresItsKey(t *testing.T) {
 	d := openTestDB(t)
 	if err := d.RecordReviewAnswer(ReviewAnswer{Branch: "feature", QuestionID: "q1", Answer: "a"}); err == nil {

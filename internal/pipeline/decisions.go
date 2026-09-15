@@ -78,6 +78,5 @@ func BindPreviousRunReviewRounds(sctx *StepContext) {
 	if previous == nil || previous.RunID == strings.TrimSpace(sctx.UncertifiedSourceRunID) {
 		return
 	}
-	sctx.PreviousRunID = previous.RunID
 	sctx.PreviousRunReviewRounds = previous.Rounds
 }
