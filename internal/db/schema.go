@@ -185,10 +185,6 @@ CREATE TABLE IF NOT EXISTS intent_cache (
     created_at  INTEGER NOT NULL
 );
 
--- Per-branch range of pipeline-authored commits whose re-review did not
--- complete. The next run's initial review reads this so it is not cold on
--- uncertified fixer commits. PRIMARY KEY per branch: the latest uncertified
--- HEAD replaces an older range.
 -- Answers a human gave to a review turn's questions, keyed by branch so the
 -- next COLD reviewer - in this run or any later one - reads what is already
 -- settled. A mid-turn answer is not a gate response, so it cannot ride the
@@ -212,6 +208,10 @@ CREATE TABLE IF NOT EXISTS review_questions (
     PRIMARY KEY (repo_id, branch, question_id)
 );
 
+-- Per-branch range of pipeline-authored commits whose re-review did not
+-- complete. The next run's initial review reads this so it is not cold on
+-- uncertified fixer commits. PRIMARY KEY per branch: the latest uncertified
+-- HEAD replaces an older range.
 CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
     repo_id       TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     branch        TEXT NOT NULL,
