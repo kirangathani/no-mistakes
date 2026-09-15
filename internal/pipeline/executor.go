@@ -921,9 +921,21 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// change were precisely the ones a decision never reached.
 	BindBranchDecisions(sctx)
 
+	// The entry trigger has to read BOTH pieces of state, not just Fixing.
+	// Resume's ActionAnswer branch sets answering and deliberately leaves
+	// fixing false (no code changed), so deriving the label from Fixing alone
+	// persisted a finalize turn delivered through daemon-restart recovery as
+	// "initial" - claiming the run had two initial review rounds, durably, in
+	// the round-history prompt sections and the PR pipeline summary, with no
+	// error anywhere. A park lasts tens of minutes to hours, which is exactly
+	// the window recovery exists for. The live loop already labels this
+	// "answer" when it re-enters the step itself.
 	nextTrigger := "initial"
-	if sctx.Fixing {
+	switch {
+	case sctx.Fixing:
 		nextTrigger = "auto_fix"
+	case state.answering:
+		nextTrigger = "answer"
 	}
 	skipRemaining := false
 	stepSkipped := false
