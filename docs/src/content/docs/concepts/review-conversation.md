@@ -176,6 +176,25 @@ required - after it has reviewed everything it can and emitted every question -
 and in that state no process is alive at all, so there is nothing to time out
 and nothing to poll.
 
+Reusing the approval park costs one thing that has to be paid for: the park is
+released by a response, and there is a window in which no response can arrive.
+The review step builds a finding for each open question and returns, and only
+afterwards does the executor register the gate as waiting. An answer landing in
+between is recorded on disk, but `axi answer` finds no gate to release and says
+so - and the gate then parks on a snapshot that is already stale, with no
+reviewer left to read the answer. So the parked review gate re-checks the
+conversation on a timer (`pipeline.ApprovalGateResumer`, the same cadence as
+[`gate_reconcile_interval`](/no-mistakes/reference/global-config/)) and, once
+nothing is open, resumes the reviewer itself.
+
+It resumes rather than completing, which is the distinction that interface
+exists for: completing the step here would approve the run's head off the stale
+snapshot without the reviewer ever seeing the answers. Three conditions must all
+hold before it acts - the conversation is on, the parked gate really does carry
+review-question findings, and nothing is open - so a review gate parked on
+ordinary code findings is never answered out from under the operator, and a
+repository that has not opted in sees no change at all.
+
 ### Notification is a push, not a poll
 
 While the reviewer is *working*, it re-reads `answers.ndjson` itself at its own

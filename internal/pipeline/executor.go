@@ -1481,7 +1481,9 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		}
 	}()
 
-	if _, ok := step.(ApprovalGateReconciler); !ok {
+	_, reconciles := step.(ApprovalGateReconciler)
+	_, resumes := step.(ApprovalGateResumer)
+	if !reconciles && !resumes {
 		select {
 		case response := <-e.approvalCh:
 			return response, false, nil
@@ -1503,6 +1505,23 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		case <-ctx.Done():
 			return approvalResponse{}, false, context.Cause(ctx)
 		case <-timer.C:
+			// A resumer runs first and returns a RESPONSE rather than a
+			// completion, so the gate re-enters its step exactly as it would
+			// for an operator's own action. Claiming the gate here is the same
+			// race guard reconciliation uses: an operator response that landed
+			// first wins.
+			if action, resume, err := e.resumeApprovalGate(ctx, step, sctx, findings); resume {
+				if e.claimGateReconciliation() {
+					return approvalResponse{action: action}, false, nil
+				}
+				return <-e.approvalCh, false, nil
+			} else if err != nil && ctx.Err() == nil {
+				if sctx != nil && sctx.Log != nil {
+					sctx.Log(fmt.Sprintf("warning: could not re-check parked %s gate; preserving it: %v", step.Name(), err))
+				} else {
+					slog.Warn("could not re-check parked approval gate; preserving it", "step", step.Name(), "error", err)
+				}
+			}
 			resolved, err := e.reconcileApprovalGate(ctx, step, sctx, findings)
 			if resolved {
 				if e.claimGateReconciliation() {
@@ -1534,6 +1553,29 @@ func (e *Executor) claimGateReconciliation() bool {
 	e.waiting = false
 	e.waitingStep = ""
 	return true
+}
+
+// resumeApprovalGate asks a step whether its parked gate is now answerable.
+// Bounded and read-only, exactly like reconcileApprovalGate, and it never
+// completes a step - the action it returns is delivered as an ordinary gate
+// response.
+func (e *Executor) resumeApprovalGate(ctx context.Context, step Step, sctx *StepContext, findingsJSON string) (types.ApprovalAction, bool, error) {
+	resumer, ok := step.(ApprovalGateResumer)
+	if !ok {
+		return "", false, nil
+	}
+	if HasProtectedPathRefusal(findingsJSON) {
+		return "", false, nil
+	}
+	timeout := e.gateReconcileTimeout
+	if timeout <= 0 {
+		timeout = defaultGateReconcileTimeout
+	}
+	resumeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	copyCtx := *sctx
+	copyCtx.Ctx = resumeCtx
+	return resumer.ResumeApprovalGate(&copyCtx, findingsJSON)
 }
 
 func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *StepContext, findingsJSON string) (bool, error) {

@@ -327,3 +327,61 @@ func marshalSanitizedAnswerLine(a db.ReviewAnswer) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// ResumeApprovalGate re-checks a parked review gate against the conversation on
+// disk, and is the review step's half of pipeline.ApprovalGateResumer.
+//
+// It closes a race that otherwise parks a run forever. ReviewStep.Execute loads
+// the conversation, builds a finding for each still-open question and returns;
+// only afterwards does the executor write the step rows and register the gate as
+// waiting. An answer to the last open question landing inside that window is
+// appended to disk, so the daemon's answer handler sees nothing open, calls
+// Respond, gets "no step awaiting approval", and reports the answer recorded -
+// truthfully, but there is no reviewer left to read it. The gate then parks on
+// the pre-answer snapshot and nothing releases it.
+//
+// It returns an ACTION rather than resolving the gate, which is the whole reason
+// ApprovalGateResumer exists: completing the review step here would approve the
+// run's head off that stale snapshot without the reviewer ever seeing the
+// answers. types.ActionAnswer re-enters the step as a finalize turn instead -
+// the same outcome the answer handler produces on the happy path.
+//
+// Three conditions must all hold, and each one is load-bearing:
+//
+//   - the conversation is on. Off, there is nothing to re-check and the gate
+//     behaves exactly as it did before this feature existed.
+//   - the parked gate actually carries review-question findings. A review gate
+//     parked on ordinary ask-user CODE findings must never be answered out from
+//     under the operator just because no question happens to be open - that is
+//     the same defect the answer handler's snapshot check exists to prevent.
+//   - nothing is open in the conversation now. While a question is still open
+//     the gate is parked for a reason.
+//
+// Read-only and fails closed: an unreadable conversation leaves the gate parked.
+func (s *ReviewStep) ResumeApprovalGate(sctx *pipeline.StepContext, findingsJSON string) (types.ApprovalAction, bool, error) {
+	dir := reviewConversationDir(sctx)
+	if dir == "" {
+		return "", false, nil
+	}
+	parsed, err := types.ParseFindingsJSON(findingsJSON)
+	if err != nil {
+		return "", false, fmt.Errorf("parse parked review findings: %w", err)
+	}
+	if !types.HasReviewQuestion(parsed) {
+		return "", false, nil
+	}
+	if err := sctx.Ctx.Err(); err != nil {
+		return "", false, err
+	}
+	conv, err := reviewqa.Load(dir)
+	if err != nil {
+		return "", false, fmt.Errorf("read the review conversation: %w", err)
+	}
+	if len(conv.Open()) > 0 {
+		return "", false, nil
+	}
+	if sctx.Log != nil {
+		sctx.Log("every review question is answered; resuming the reviewer to finish its pass")
+	}
+	return types.ActionAnswer, true, nil
+}

@@ -167,6 +167,26 @@ type ApprovalGateReconciler interface {
 	ReconcileApprovalGate(sctx *StepContext) (resolved bool, err error)
 }
 
+// ApprovalGateResumer is implemented by a step whose parked approval gate can
+// become ANSWERABLE rather than obsolete: the condition that parked it is gone,
+// but the right outcome is to run the step again rather than to complete it.
+//
+// It exists because ApprovalGateReconciler cannot express that. A reconciler's
+// true result completes the step through the success path, which is correct for
+// the CI step - a merged or closed PR genuinely settles it - and wrong for the
+// review step, where completing would approve the run's head off the findings
+// snapshot the gate parked with, without the reviewer ever seeing the answers
+// that arrived. So a resumer returns the ApprovalAction to re-enter the step
+// with, and the executor delivers it exactly as if an operator had sent it; no
+// step completes on this path.
+//
+// resume false leaves the gate parked. Implementations must be read-only, must
+// fail closed, and must be certain the action belongs to THIS gate: a gate
+// parked on something the action does not answer must be left alone.
+type ApprovalGateResumer interface {
+	ResumeApprovalGate(sctx *StepContext, findingsJSON string) (action types.ApprovalAction, resume bool, err error)
+}
+
 // ApprovalOverrideVerifier is implemented by a step whose approval must not
 // erase the condition that caused its gate (currently: the CI step's live
 // failing checks, and the Test step's persisted failing commands.test result).
