@@ -181,12 +181,17 @@ fixer and survives a daemon restart, because the session id is persisted in
 | Finalize after answers | resumes `reviewer` | conversational within a round; nothing re-read |
 | Re-review after any code change | cold | independence: a reviewer must not certify its own prescription |
 | In-run fix round (`sctx.Fixing`) | cold, and the `reviewer` session is dropped first | same reason |
+| A restart back to review (a CI repair's `RestartFrom`) | fresh, the stored identity dropped first | it re-enters the step on a new head inside the same run, so the identity in hand reviewed the OLD head |
 
 `RunSessions` is keyed by `(run, role)`, so an author push that supersedes the
 run starts a new run and therefore a cold reviewer with no extra work. Within a
-run, the review step drops the `reviewer` session identity the moment a fix
-round begins (`Forget(SessionRoleReviewer)`), so no fix round can ever be
-certified by the session that prescribed it.
+run the rule is stated as a single narrow permission rather than a list of
+exclusions: a stored reviewer identity may be resumed by the finalize turn of
+the pass that created it, and by nothing else. Every other entry into the
+review step calls `Forget(SessionRoleReviewer)` first, which deletes the
+persisted row too, so the rule holds across a daemon restart. That covers the
+fix round and the restart-back-to-review above without either needing its own
+special case.
 
 An answer settles only the question it answers. The finalize prompt says so
 explicitly: an answer of "that is intended" closes the question it names and
