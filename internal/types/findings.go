@@ -155,9 +155,10 @@ const (
 //     file, so there was nothing to drive. The verdict is no-surface and,
 //     because the gate rather than a human reached that conclusion, it does
 //     NOT park (see the steps package's verdictFindings).
-//   - TestEvidenceSourceReused: an earlier run on the same branch recorded a
-//     go verdict and no product file has changed since, so that verdict and
-//     its scenarios stand.
+//   - TestEvidenceSourceReused: this branch's newest recorded verdict was a
+//     go, earned under the same user intent at a product state this head still
+//     matches, so that verdict and its scenarios stand. The steps package's
+//     test_gate.go owns the exact conditions.
 //
 // An empty value is every payload written before the gate existed, and reads
 // as "the agent ran", which is what those runs did.
@@ -309,9 +310,9 @@ type Findings struct {
 	TestedHeadSHA  string         `json:"tested_head_sha,omitempty"`
 	// EvidenceSource and EvidenceReason record which path the Test step's
 	// diff-class gate took (see the TestEvidenceSource* constants) and the
-	// one-line human account of why, including the prior run id and evidence
-	// directory on a reuse. Both are omitempty and absent from every payload
-	// written before the gate existed.
+	// one-line human account of why, which on a reuse points at the run that
+	// actually drove the agent. Both are omitempty and absent from every
+	// payload written before the gate existed.
 	EvidenceSource string `json:"evidence_source,omitempty"`
 	EvidenceReason string `json:"evidence_reason,omitempty"`
 	RiskLevel      string `json:"risk_level"`
