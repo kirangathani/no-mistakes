@@ -142,6 +142,13 @@ func (c Conversation) filter(keep func(Entry) bool) []Entry {
 	return out
 }
 
+// DirName is the conversation directory's name inside the run's evidence
+// directory. It is exported because the conversation shares that directory
+// with the run's TEST evidence, which is publishable: the PR step excludes this
+// name from the evidence-branch walk, and naming it here keeps the exclusion
+// and the location from drifting apart.
+const DirName = "review"
+
 // Dir is the review conversation directory for a run, given that run's
 // evidence directory. Empty in, empty out: an embedding with no evidence
 // directory has no conversation, and callers treat that as "no questions".
@@ -149,7 +156,7 @@ func Dir(evidenceDir string) string {
 	if strings.TrimSpace(evidenceDir) == "" {
 		return ""
 	}
-	return filepath.Join(evidenceDir, "review")
+	return filepath.Join(evidenceDir, DirName)
 }
 
 // Load reads a conversation directory. A missing directory or a missing file

@@ -61,12 +61,15 @@ all, since a re-ask is detected by counting asks against answers rather than by
 comparing timestamps. A line that omits them is the normal case, not a
 degraded one.
 
-Because the files live in the run's evidence directory, an operator who has
-opted into [`test.evidence.store_in_repo`](/no-mistakes/reference/repo-config/)
-publishes them along with the run's other evidence. That is the same content the
-PR body already records, so it is deliberate rather than incidental - but note
-that the copy on the evidence branch is the raw text, while the PR body's copy
-goes through the home-path redaction every published body does.
+The conversation stays LOCAL to the run. The files live in the run's evidence
+directory, but the conversation directory is excluded from the evidence-branch
+publication walk, so opting into
+[`test.evidence.store_in_repo`](/no-mistakes/reference/repo-config/) publishes
+the run's test evidence and never the conversation. The only published copy is
+the bounded rendering in the PR body, which goes through the home-path redaction
+every published body does. Publishing the raw files instead would put the full
+question text, the full answer text and who answered on an orphan branch
+verbatim and permanently, with neither of those protections.
 
 ### questions.ndjson
 
