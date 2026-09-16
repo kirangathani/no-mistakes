@@ -305,12 +305,15 @@ body - silently.
 
 The ask ordinal arrived with the table, so every installation's database has it.
 A *development* database created from an earlier commit of this feature's branch
-does not, and there the store cannot work at all: the daemon refuses to open
-such a database and names the remedy, which is to drop `review_questions` by
-hand (`sqlite3 <db> 'DROP TABLE review_questions'`) and let it be recreated.
-There is deliberately no migration - SQLite cannot ALTER a column into a primary
-key, and the migration list is re-run with its errors tolerated on every start,
-which a create/copy/drop/rename could not survive.
+does not, and there this store cannot work at all: every read and every write
+names the column, so each one fails and says so at ERROR level. The remedy is to
+drop `review_questions` by hand (`sqlite3 <db> 'DROP TABLE review_questions'`)
+and let it be recreated. There is deliberately no migration - SQLite cannot
+ALTER a column into a primary key, and the migration list is re-run with its
+errors tolerated on every start, which a create/copy/drop/rename could not
+survive. Nothing else in the daemon is affected by such a table: an opt-in
+review feature must not be able to stop the daemon starting, or block custody
+recovery, for a repository that does not use it.
 
 Every later review turn on the same branch, in any run, receives them as a
 **Settled questions (do not re-raise)** prompt section, rendered separately from

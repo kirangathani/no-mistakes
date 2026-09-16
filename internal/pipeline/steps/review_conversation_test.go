@@ -1101,9 +1101,18 @@ func TestReviewPromptNamesTheConversationDirectoryAsABoundaryException(t *testin
 		t.Fatalf("the protocol section does not authorize the write the boundary forbids:\n%s", prompt)
 	}
 	// The exception has to name the directory it covers, or it reads as a
-	// general licence rather than one path.
-	exception := prompt[strings.Index(prompt, "EXPLICIT exception to the workspace boundary"):]
-	if line, _, _ := strings.Cut(exception, "\n"); !strings.Contains(prompt[:strings.Index(prompt, line)], convDir) {
-		t.Fatalf("the exception does not name %q:\n%s", convDir, prompt)
+	// general licence rather than one path. The assertion is against that
+	// SENTENCE: the channel bullet one line above names the directory too, so
+	// anything that looks at the surrounding prompt passes whether or not the
+	// exception itself is scoped to a path.
+	var exception string
+	for _, line := range strings.Split(prompt, "\n") {
+		if strings.Contains(line, "EXPLICIT exception to the workspace boundary") {
+			exception = line
+			break
+		}
+	}
+	if !strings.Contains(exception, convDir) {
+		t.Fatalf("the exception does not name %q, so it reads as a general licence: %q", convDir, exception)
 	}
 }

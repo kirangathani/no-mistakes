@@ -221,7 +221,22 @@ func loadBranchReviewAnswers(sctx *pipeline.StepContext) ([]db.ReviewAnswer, boo
 // the step_rounds decision channel that carries approve/fix/skip.
 //
 // Best effort: a write failure degrades the next reviewer's context, and
-// failing the review over it would throw away a completed pass.
+// failing the review over it would throw away a completed pass. It is reported
+// at ERROR rather than as a degradation, because the decision it drops is a
+// human's and nothing else records it.
+//
+// One shape of failure is worth naming, since there is deliberately no
+// migration for it. review_questions gained ask_ordinal inside this feature's
+// own branch, and every statement here and in the read path names that column,
+// so a database created by an earlier commit of that branch fails every write
+// and every read. No released version ships the old shape - CREATE TABLE gives
+// every other database the five-column key - and migrationStatements could not
+// carry the remedy anyway: they are re-executed with their errors TOLERATED on
+// every start, which is safe for an additive ALTER and destructive for the
+// create/copy/drop/rename a key change needs, since SQLite cannot ALTER a
+// column into a primary key. The blast radius stays this store: such a
+// development database reports loudly here and is repaired by dropping the
+// table by hand, and nothing else in the application is affected.
 func recordAnsweredQuestions(sctx *pipeline.StepContext, conv reviewqa.Conversation) {
 	if sctx == nil || sctx.DB == nil || sctx.Repo == nil || sctx.Run == nil {
 		return
