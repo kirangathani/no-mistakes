@@ -11,7 +11,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -525,9 +524,13 @@ func gateFields(gate stepView) []toon.Field {
 	// A review parked in waiting-on-answers is not asking for a verdict: its
 	// reviewer asked questions and cannot finish without them. Approving or
 	// fixing would discard the pass it paused, so answering leads the help.
-	if questions := reviewQuestionRows(gate.FindingsJSON); len(questions) > 0 {
+	// Keyed on the shared predicate, the same one the two auto-resolve paths
+	// read, rather than on a second rendering of the questions: each open
+	// question is already a finding in the rows below, carrying its id and the
+	// options the reviewer stated.
+	if pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON) {
 		help = append([]string{
-			fmt.Sprintf("This review is waiting on answers to %d question(s) its reviewer asked; answer each with `no-mistakes axi answer --question <id> --answer \"<one of its options>\"` and the same reviewer resumes and finishes its pass", len(questions)),
+			"This review is waiting on answers to the question(s) its reviewer asked; each is a `question-<id>` finding below. Answer each with `no-mistakes axi answer --question <id> --answer \"<one of its options>\"` and the same reviewer resumes and finishes its pass",
 			"Do not approve or fix to get past a review question: that throws away the paused review pass instead of answering it",
 		}, help...)
 	}
@@ -581,15 +584,6 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 		})
 	}
 	gfields = append(gfields, toon.Field{Key: "findings", Value: rows})
-	// Surfaced separately from findings, with the options intact, because an
-	// open question is the only "finding" whose resolution is an answer rather
-	// than a fix or a verdict.
-	if questions := reviewQuestionRows(gate.FindingsJSON); len(questions) > 0 {
-		gfields = append(gfields,
-			toon.Field{Key: "waiting_on", Value: "answers"},
-			toon.Field{Key: "review_questions", Value: questions},
-		)
-	}
 
 	return []toon.Field{
 		{Key: "gate", Value: toon.NewObject(gfields...)},
@@ -756,63 +750,4 @@ func emitError(cmd *cobra.Command, code int, msg string, help ...string) error {
 	}
 	emitDoc(cmd, fields...)
 	return &exitError{code: code}
-}
-
-// reviewQuestionRow is one question the reviewer asked and nobody has answered
-// yet, as rendered under a parked review gate.
-type reviewQuestionRow struct {
-	ID       string `toon:"id"`
-	Question string `toon:"question"`
-	Options  string `toon:"options"`
-	File     string `toon:"file"`
-}
-
-// reviewQuestionRows extracts the review-question findings from a gate's
-// findings, recovering each question's id and its stated options from the
-// synthetic finding the review step emitted for it.
-//
-// It reads the findings the gate already carries rather than adding an IPC
-// surface: the open questions ARE those findings, so a second channel could
-// only disagree with them.
-func reviewQuestionRows(findingsJSON string) []reviewQuestionRow {
-	parsed, err := types.ParseFindingsJSON(findingsJSON)
-	if err != nil {
-		return nil
-	}
-	var rows []reviewQuestionRow
-	for _, f := range parsed.Items {
-		if f.Category != types.FindingCategoryReviewQuestion {
-			continue
-		}
-		id, ok := steps.ReviewQuestionID(f.ID)
-		if !ok {
-			continue
-		}
-		question, options := splitReviewQuestionDescription(f.Description)
-		rows = append(rows, reviewQuestionRow{
-			ID:       id,
-			Question: truncate(question, maxFindingDesc),
-			Options:  truncate(options, maxFindingDesc),
-			File:     f.File,
-		})
-	}
-	return rows
-}
-
-// splitReviewQuestionDescription pulls the question text and the options line
-// out of a review-question finding's description. It degrades to the whole
-// description as the question when either marker is absent, so a description
-// shape change reads as a less structured row rather than an empty one.
-func splitReviewQuestionDescription(description string) (question, options string) {
-	question = description
-	if _, rest, ok := strings.Cut(description, "Review question awaiting an answer: "); ok {
-		question = rest
-	}
-	if head, rest, ok := strings.Cut(question, "\nOptions: "); ok {
-		question = head
-		options, _, _ = strings.Cut(rest, "\n")
-	}
-	question, _, _ = strings.Cut(question, "\nAnswer it with:")
-	question, _, _ = strings.Cut(question, "\nArea: ")
-	return strings.TrimSpace(question), strings.TrimSpace(options)
 }

@@ -248,7 +248,7 @@ no-mistakes axi answer --question q1 --answer "Keep it behind a flag" --by capta
 
 | Flag         | Type     | Default            | Description                                                              |
 | ------------ | -------- | ------------------ | ------------------------------------------------------------------------ |
-| `--question` | `string` | (none)             | Question ID from the review gate's `review_questions`; required          |
+| `--question` | `string` | (none)             | Question ID, as carried by the review gate's `question-<id>` findings; required |
 | `--answer`   | `string` | (none)             | The answer, ideally one of the question's stated options; required       |
 | `--by`       | `string` | (none)             | Who answered; recorded on the PR and in the branch's settled questions   |
 

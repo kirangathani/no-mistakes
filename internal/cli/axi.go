@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/skill"
 	"github.com/spf13/cobra"
 )
@@ -214,7 +215,7 @@ func runAxiHome(cmd *cobra.Command) error {
 		}
 		if gate, ok := rv.awaitingStep(); ok {
 			gated = true
-			gatedOnAnswers = len(reviewQuestionRows(gate.FindingsJSON)) > 0
+			gatedOnAnswers = pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON)
 			fields = append(fields, gateFields(gate)...)
 		}
 	} else if otherActive != nil {

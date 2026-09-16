@@ -33,21 +33,23 @@ func reviewQuestionGate(t *testing.T) stepView {
 	}
 }
 
-// TestReviewQuestionGate_ShowsQuestionsDistinctlyAndLeadsWithAnswering covers
-// the `axi` half of waiting-on-answers: an agent reading the gate must be able
-// to tell "this review wants an answer" from "this review wants a verdict",
-// and must not reach for approve or fix, which would discard the paused pass
-// instead of answering it.
-func TestReviewQuestionGate_ShowsQuestionsDistinctlyAndLeadsWithAnswering(t *testing.T) {
+// TestReviewQuestionGate_LeadsWithAnswering covers the `axi` half of
+// waiting-on-answers: an agent reading the gate must be able to tell "this
+// review wants an answer" from "this review wants a verdict", and must not
+// reach for approve or fix, which would discard the paused pass instead of
+// answering it.
+//
+// The question is surfaced as an ordinary finding row carrying its
+// `question-<id>` id and the reviewer's own description, not as a second
+// structured rendering: reconstructing question and options by splitting that
+// prose was a lossy round trip that rendered a wrong row for any question
+// whose text contained its own "Options: " line.
+func TestReviewQuestionGate_LeadsWithAnswering(t *testing.T) {
 	got := axiDoc(gateFields(reviewQuestionGate(t))...)
 
 	for _, want := range []string{
-		"waiting_on",
-		"answers",
-		"review_questions",
-		"q1",
+		"question-q1",
 		"Should the legacy /v1 route keep answering?",
-		"Keep answering | Remove it",
 		"no-mistakes axi answer --question",
 		"Do not approve or fix to get past a review question",
 	} {
@@ -65,8 +67,22 @@ func TestReviewQuestionGate_ShowsQuestionsDistinctlyAndLeadsWithAnswering(t *tes
 	}
 }
 
+// The help is keyed on the review-question CATEGORY through the shared
+// predicate, so a finding that merely looks like one by ID does not summon it.
+func TestReviewQuestionGateHelpKeysOnTheCategory(t *testing.T) {
+	gate := reviewQuestionGate(t)
+	gate.FindingsJSON = findingsJSON(t, []types.Finding{
+		{ID: "question-q1", Severity: "warning", Action: types.ActionAskUser, Description: "not actually a review question"},
+	}, "1 issue")
+
+	got := axiDoc(gateFields(gate)...)
+	if strings.Contains(got, "axi answer --question") {
+		t.Fatalf("a question-shaped ID summoned the answering help:\n%s", got)
+	}
+}
+
 // A review gate with no open question keeps exactly today's shape: no
-// waiting_on marker, no answering guidance, approve/fix leading as before.
+// answering guidance, approve/fix leading as before.
 func TestReviewGateWithoutQuestionsIsUnchanged(t *testing.T) {
 	gate := reviewQuestionGate(t)
 	gate.FindingsJSON = findingsJSON(t, []types.Finding{
@@ -74,54 +90,13 @@ func TestReviewGateWithoutQuestionsIsUnchanged(t *testing.T) {
 	}, "1 blocking issue")
 
 	got := axiDoc(gateFields(gate)...)
-	for _, unwanted := range []string{"waiting_on", "review_questions", "axi answer --question"} {
+	for _, unwanted := range []string{"axi answer --question", "Do not approve or fix"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("ordinary review gate leaked %q:\n%s", unwanted, got)
 		}
 	}
 	if !strings.Contains(got, "axi respond --action approve") {
 		t.Fatalf("ordinary review gate lost its approve guidance:\n%s", got)
-	}
-}
-
-func TestSplitReviewQuestionDescription(t *testing.T) {
-	question, options := splitReviewQuestionDescription(
-		"Review question awaiting an answer: Keep /v1?\nOptions: keep | drop\nArea: routing\nAnswer it with: no-mistakes axi answer --question q1 --answer \"keep\"",
-	)
-	if question != "Keep /v1?" {
-		t.Fatalf("question = %q", question)
-	}
-	if options != "keep | drop" {
-		t.Fatalf("options = %q", options)
-	}
-
-	// A description that does not carry the markers degrades to a less
-	// structured row, never an empty one.
-	question, options = splitReviewQuestionDescription("just some text")
-	if question != "just some text" || options != "" {
-		t.Fatalf("degraded parse = %q / %q", question, options)
-	}
-}
-
-// A finding whose id does not carry a question id is not rendered as a
-// question: the id is how `axi answer --question` addresses it, so a row
-// without one would be unanswerable.
-func TestReviewQuestionRowsIgnoreFindingsWithNoQuestionID(t *testing.T) {
-	gate := stepView{
-		Name:   string(types.StepReview),
-		Status: string(types.StepStatusAwaitingApproval),
-		FindingsJSON: findingsJSON(t, []types.Finding{
-			{
-				ID: "review-7", Severity: types.FindingSeverityWarning, Action: types.ActionAskUser,
-				Category: types.FindingCategoryReviewQuestion, Description: "Review question awaiting an answer: odd",
-			},
-		}, "1 issue"),
-	}
-	if rows := reviewQuestionRows(gate.FindingsJSON); len(rows) != 0 {
-		t.Fatalf("rows = %+v, want none", rows)
-	}
-	if rows := reviewQuestionRows("not json"); len(rows) != 0 {
-		t.Fatalf("unparseable findings produced rows: %+v", rows)
 	}
 }
 
