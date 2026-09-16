@@ -388,17 +388,29 @@ func TestTestStep_ReusesAGoVerdictWhenProductFilesAreUnchanged(t *testing.T) {
 	for _, want := range []string{
 		"product files unchanged since " + shortSHA(validated),
 		"reused from run " + priorRunID,
-		filepath.Join(filepath.Dir(sctx.EvidenceDir), priorRunID),
 	} {
 		if !strings.Contains(findings.EvidenceReason, want) {
 			t.Fatalf("evidence reason %q omits %q", findings.EvidenceReason, want)
 		}
 	}
+	// The reason is published in the PR body, and the publication redactor
+	// only removes home directories - test.evidence.local_root is documented
+	// as any absolute path - so the reason must carry no host path at all.
+	if dir := filepath.Dir(sctx.EvidenceDir); strings.Contains(findings.EvidenceReason, dir) {
+		t.Fatalf("evidence reason %q publishes the host evidence path %q", findings.EvidenceReason, dir)
+	}
 	if len(findings.Scenarios) != 1 || findings.Scenarios[0].Name != "user reaches the success screen" {
 		t.Fatalf("scenarios = %+v, want the reused run's scenario list", findings.Scenarios)
 	}
-	if findings.TestedHeadSHA != head {
-		t.Fatalf("tested head = %q, want this run's head %q", findings.TestedHeadSHA, head)
+	// The verdict is recorded against the head its scenarios were actually
+	// driven at, never restamped onto this one. That is what makes
+	// attestedLiveValidation omit live_validation for this head instead of
+	// publishing a live claim for a run that drove nothing.
+	if findings.TestedHeadSHA != validated {
+		t.Fatalf("tested head = %q, want the head the scenarios were driven at %q", findings.TestedHeadSHA, validated)
+	}
+	if findings.TestedHeadSHA == head {
+		t.Fatal("a reused verdict must not be restamped onto this run's head")
 	}
 }
 

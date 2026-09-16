@@ -57,7 +57,7 @@ func TestRenderLiveValidationLine_NamesTheEvidencePath(t *testing.T) {
 	t.Parallel()
 	scenarios := []types.TestScenario{{Name: "checkout", Result: types.ScenarioResultPass, Live: true}}
 
-	line := renderLiveValidationLine(scenarios, types.TestVerdictGo, "product files unchanged since abc123; reused from run run-9 (evidence: /tmp/evidence/run-9)")
+	line := renderLiveValidationLine(scenarios, types.TestVerdictGo, "product files unchanged since abc123; reused from run run-9", types.TestEvidenceSourceReused)
 	for _, want := range []string{"go", "1 of 1 scenarios driven live", "reused from run run-9"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("line %q omits %q", line, want)
@@ -65,18 +65,18 @@ func TestRenderLiveValidationLine_NamesTheEvidencePath(t *testing.T) {
 	}
 
 	// A pre-gate payload renders exactly as before.
-	if got := renderLiveValidationLine(scenarios, types.TestVerdictGo, ""); strings.Contains(got, "(") {
+	if got := renderLiveValidationLine(scenarios, types.TestVerdictGo, "", ""); strings.Contains(got, "(") {
 		t.Errorf("line %q should carry no evidence note", got)
 	}
 
 	// An automatic no-surface has no scenarios at all, so the reason is the
 	// only thing worth rendering.
-	got := renderLiveValidationLine(nil, types.TestVerdictNoSurface, "no product file in diff")
+	got := renderLiveValidationLine(nil, types.TestVerdictNoSurface, "no product file in diff", types.TestEvidenceSourceNoProductChange)
 	if !strings.Contains(got, "no-surface") || !strings.Contains(got, "no product file in diff") {
 		t.Errorf("line %q should name the automatic no-surface and its reason", got)
 	}
 
-	if got := renderLiveValidationLine(nil, "", ""); got != "" {
+	if got := renderLiveValidationLine(nil, "", "", ""); got != "" {
 		t.Errorf("nothing recorded should render nothing, got %q", got)
 	}
 }
