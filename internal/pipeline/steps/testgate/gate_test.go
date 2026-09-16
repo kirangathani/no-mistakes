@@ -185,7 +185,7 @@ func recordPriorVerdictWithIntent(t *testing.T, sctx *pipeline.StepContext, head
 			Live:     true,
 			Evidence: "checkout.png",
 		}},
-		Artifacts:      []types.TestArtifact{{Label: "checkout", Path: "checkout.png"}},
+		Artifacts:      []types.TestArtifact{{Label: "checkout", Path: filepath.Join(filepath.Dir(sctx.EvidenceDir), run.ID, "checkout.png")}},
 		Verdict:        verdict,
 		TestedHeadSHA:  headSHA,
 		EvidenceSource: types.TestEvidenceSourceAgent,
@@ -206,6 +206,46 @@ func recordPriorVerdictWithIntent(t *testing.T, sctx *pipeline.StepContext, head
 		t.Fatal(err)
 	}
 	return run.ID
+}
+
+// TestTestStep_AgentCannotSeedTheEvidenceOriginRunID: evidence_origin_run_id
+// is joined into a filesystem path by carryOriginEvidence, and an agent turn's
+// raw output is decoded by the same types.ParseFindingsJSON that reads a
+// stored payload back, so a turn that emits the key must not have it persist.
+// Were it to persist, a later reuse on the branch would copy the named
+// directory's contents into this run's evidence directory, which publication
+// then pushes to the evidence branch or uploads to the PR.
+func TestTestStep_AgentCannotSeedTheEvidenceOriginRunID(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := stepstest.SetupGitRepo(t)
+	head := commitFiles(t, dir, "product change", map[string]string{
+		"internal/checkout/checkout.go": "package checkout\n",
+	})
+	hostile := `{
+  "findings": [],
+  "summary": "",
+  "tested": ["npm run e2e -- checkout"],
+  "testing_summary": "drove checkout end to end",
+  "artifacts": [],
+  "scenarios": [{"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""}],
+  "verdict": "go",
+  "evidence_origin_run_id": "../../../../etc"
+}`
+	ag := &stepstest.MockAgent{
+		AgentName: "test",
+		RunFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(hostile)}, nil
+		},
+	}
+	sctx := gateContext(t, ag, dir, baseSHA, head)
+
+	outcome, err := (&steps.TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parseOutcomeFindings(t, outcome).EvidenceOriginRunID; got != "" {
+		t.Fatalf("evidence origin run = %q, want it cleared: the agent must not name a directory the pipeline will copy", got)
+	}
 }
 
 // writeRunEvidence places an evidence file in a run's own evidence directory,
@@ -435,8 +475,13 @@ func TestTestStep_ReusesAGoVerdictWhenProductFilesAreUnchanged(t *testing.T) {
 	// The verdict is published with the evidence behind it: the originating
 	// run's artifacts are carried, and its evidence file physically reaches
 	// this run's directory, which is the only one publication reads.
-	if len(findings.Artifacts) != 1 || findings.Artifacts[0].Path != "checkout.png" {
-		t.Fatalf("artifacts = %+v, want the originating run's evidence carried forward", findings.Artifacts)
+	// The path must be rebased onto THIS run's directory: the renderer accepts
+	// an absolute artifact path only under the repository root or this run's
+	// evidence directory, so a carried path left naming the originating run is
+	// dropped at render time and the carry silently does nothing.
+	wantPath := filepath.Join(sctx.EvidenceDir, "checkout.png")
+	if len(findings.Artifacts) != 1 || findings.Artifacts[0].Path != wantPath {
+		t.Fatalf("artifacts = %+v, want one rebased onto %q", findings.Artifacts, wantPath)
 	}
 	if findings.EvidenceOriginRunID != priorRunID {
 		t.Fatalf("origin run = %q, want %q", findings.EvidenceOriginRunID, priorRunID)

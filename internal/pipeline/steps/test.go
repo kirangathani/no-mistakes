@@ -237,9 +237,18 @@ Rules:
 	if len(tested) > 0 {
 		findings.Tested = append(append([]string{}, tested...), findings.Tested...)
 	}
+	// These four are pipeline-owned, and the agent's own output is parsed by
+	// the same types.ParseFindingsJSON that reads them back from the database
+	// (see unmarshalRequiredFindings), so whatever the turn emitted for them
+	// has to be overwritten here rather than trusted. EvidenceOriginRunID is
+	// cleared rather than set: this run drove the agent itself, so it has no
+	// originating run - and it is later joined into a filesystem path by
+	// carryOriginEvidence, which is exactly why an agent-supplied value must
+	// never survive. Add any new pipeline-owned evidence field to this block.
 	findings.TestedHeadSHA = sctx.Run.HeadSHA
 	findings.EvidenceSource = gate.Source
 	findings.EvidenceReason = gate.Reason
+	findings.EvidenceOriginRunID = ""
 	findings.Items = append(baselineFindings, findings.Items...)
 	if baselineSummary != "" {
 		findings.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, findings.Summary}, "\n"))
