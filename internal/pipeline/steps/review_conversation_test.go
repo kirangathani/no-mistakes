@@ -853,3 +853,93 @@ func TestReviewStep_ConversationOffIgnoresQuestionsAlreadyOnDisk(t *testing.T) {
 		t.Fatalf("the off run published a review conversation section:\n%s", section)
 	}
 }
+
+// TestOpenReviewQuestionFindingsAreBounded covers the channel the questions
+// borrow rather than own. The findings payload rides the IPC event stream, and
+// one frame over the transport limit kills the whole subscription - so an
+// unbounded set of question findings could take out every attached TUI and axi
+// subscription mid-run, leaving the operator unable to see or answer the gate
+// that is blocking the run.
+//
+// reviewqa's own bounds do not contain this: 2000 accepted lines are still a
+// "bounded" conversation while being far over the frame once each becomes a
+// finding.
+func TestOpenReviewQuestionFindingsAreBounded(t *testing.T) {
+	var conv reviewqa.Conversation
+	const open = maxReviewQuestionFindings + 7
+	for i := 0; i < open; i++ {
+		conv.Entries = append(conv.Entries, reviewqa.Entry{Question: reviewqa.Question{
+			ID:       fmt.Sprintf("q%d", i),
+			Kind:     reviewqa.KindQuestion,
+			Question: "keep the legacy route? " + strings.Repeat("é", maxReviewQuestionDescription),
+			Options:  []string{"keep", "remove"},
+		}})
+	}
+
+	findings := openReviewQuestionFindings(conv)
+
+	// One marker beyond the cap, and it is NOT an answerable row.
+	if len(findings) != maxReviewQuestionFindings+1 {
+		t.Fatalf("emitted %d findings for %d open questions, want %d plus one marker", len(findings), open, maxReviewQuestionFindings)
+	}
+	marker := findings[len(findings)-1]
+	if _, ok := ReviewQuestionID(marker.ID); ok {
+		t.Fatalf("the omission marker looks like an answerable question: %+v", marker)
+	}
+	// It must still park and still stand aside from every auto-resolver.
+	if marker.Category != types.FindingCategoryReviewQuestion || marker.Action != types.ActionAskUser {
+		t.Fatalf("marker does not park as a question: %+v", marker)
+	}
+	if !strings.Contains(marker.Description, "7 further review question") {
+		t.Fatalf("marker does not report how many were omitted: %q", marker.Description)
+	}
+
+	for _, f := range findings[:maxReviewQuestionFindings] {
+		if n := utf8.RuneCountInString(f.Description); n > maxReviewQuestionDescription+64 {
+			t.Fatalf("description is %d runes, over the bound: %q", n, f.Description)
+		}
+		// Rune-safe, not byte-sliced: the text is multi-byte throughout, so a
+		// byte cut would leave invalid UTF-8 on the event stream.
+		if !utf8.ValidString(f.Description) {
+			t.Fatalf("description is not valid UTF-8: %q", f.Description)
+		}
+	}
+}
+
+// The prompt sections carry the same set and had the same shape. Every sibling
+// prompt channel in this package is bounded, so these were the outliers.
+func TestReviewQuestionPromptSectionsAreBounded(t *testing.T) {
+	var conv reviewqa.Conversation
+	const open = maxReviewQuestionPromptEntries + 5
+	for i := 0; i < open; i++ {
+		conv.Entries = append(conv.Entries, reviewqa.Entry{Question: reviewqa.Question{
+			ID:       fmt.Sprintf("q%d", i),
+			Kind:     reviewqa.KindQuestion,
+			Question: strings.Repeat("é", maxReviewQuestionPromptChars+200),
+			Options:  []string{"keep", "remove"},
+		}})
+	}
+
+	protocol := reviewQuestionProtocolSection("/tmp/evidence/review", conv)
+	if !utf8.ValidString(protocol) {
+		t.Fatal("the protocol section is not valid UTF-8")
+	}
+	if !strings.Contains(protocol, "5 more still unanswered") {
+		t.Fatalf("the open list was not bounded:\n%s", protocol)
+	}
+	if got := strings.Count(protocol, "\n  - "); got > maxReviewQuestionPromptEntries+1 {
+		t.Fatalf("protocol section listed %d entries, over the bound", got)
+	}
+
+	// Answer every one, so the answers section carries the same set.
+	for i := range conv.Entries {
+		conv.Entries[i].Answer = &reviewqa.Answer{ID: conv.Entries[i].ID, Answer: "keep", AnsweredBy: "captain"}
+	}
+	answers := reviewAnswersPromptSection(conv)
+	if !utf8.ValidString(answers) {
+		t.Fatal("the answers section is not valid UTF-8")
+	}
+	if !strings.Contains(answers, "5 more answers not listed") {
+		t.Fatalf("the answers list was not bounded:\n%s", answers)
+	}
+}

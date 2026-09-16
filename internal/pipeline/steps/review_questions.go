@@ -103,8 +103,12 @@ func reviewQuestionProtocolSection(dir string, conv reviewqa.Conversation) strin
 	b.WriteString("- Return your findings when you have reviewed everything you can. A question still open at that point does NOT stop you finishing: the run parks for the answer and you are resumed with it. Any finding whose correctness depends on an open question must say so in its description, starting with \"PENDING ANSWER (<question id>): \".\n")
 	if open := conv.Open(); len(open) > 0 {
 		b.WriteString("\nQuestions you already asked in this pass that are still unanswered (do not re-ask them under a new id):\n")
-		for _, e := range open {
-			fmt.Fprintf(&b, "  - %s: %s\n", sanitizePromptText(e.ID), sanitizePromptText(e.Question.Question))
+		for i, e := range open {
+			if i == maxReviewQuestionPromptEntries {
+				fmt.Fprintf(&b, "  - (%d more still unanswered; do not re-ask any of them)\n", len(open)-i)
+				break
+			}
+			fmt.Fprintf(&b, "  - %s: %s\n", sanitizePromptText(e.ID), boundReviewQuestionText(sanitizePromptText(e.Question.Question), maxReviewQuestionPromptChars))
 		}
 	}
 	return b.String()
@@ -128,13 +132,21 @@ func reviewAnswersPromptSection(conv reviewqa.Conversation) string {
 	b.WriteString("If you are the same session that asked these, continue the pass you paused; do not restart it. ")
 	b.WriteString("Each answer settles ONLY the question it answers: apply it to that question and to nothing else, and do not soften a finding you did not ask about. ")
 	b.WriteString("Then return your complete findings for this pass.\n\n")
-	for _, e := range answered {
-		fmt.Fprintf(&b, "  - %s\n", marshalSanitizedQuestionLine(e))
+	for i, e := range answered {
+		if i == maxReviewQuestionPromptEntries {
+			fmt.Fprintf(&b, "  - (%d more answers not listed; re-read %s for them)\n", len(answered)-i, reviewqa.AnswersFile)
+			break
+		}
+		fmt.Fprintf(&b, "  - %s\n", boundReviewQuestionText(marshalSanitizedQuestionLine(e), maxReviewQuestionPromptChars))
 	}
 	if withdrawn := conv.Withdrawn(); len(withdrawn) > 0 {
 		b.WriteString("\nQuestions you withdrew in this pass (no answer was needed):\n")
-		for _, e := range withdrawn {
-			fmt.Fprintf(&b, "  - %s: %s\n", sanitizePromptText(e.ID), sanitizePromptText(e.Question.Question))
+		for i, e := range withdrawn {
+			if i == maxReviewQuestionPromptEntries {
+				fmt.Fprintf(&b, "  - (%d more withdrawn)\n", len(withdrawn)-i)
+				break
+			}
+			fmt.Fprintf(&b, "  - %s: %s\n", sanitizePromptText(e.ID), boundReviewQuestionText(sanitizePromptText(e.Question.Question), maxReviewQuestionPromptChars))
 		}
 	}
 	return b.String()
@@ -236,6 +248,42 @@ func recordAnsweredQuestions(sctx *pipeline.StepContext, conv reviewqa.Conversat
 // reviewQuestionFindingID is the stable finding ID for a question, so the same
 // question keeps the same handle across rounds and an operator answering it
 // never has to guess which finding is which.
+// Bounds on what the open questions may put on a channel that is not theirs.
+//
+// The findings payload rides the IPC event stream, and one frame over the
+// transport limit kills the whole subscription and hides every event after it
+// (the executor's approval-park comment owns that fact). reviewqa's own bounds
+// do not contain this: 2000 accepted lines, or ~16 lines near its 64 KiB
+// per-line bound, are all still a "bounded" conversation while being two orders
+// of magnitude over the 1 MiB frame once each becomes a finding. The prompt
+// sections have the same shape, and every sibling channel in this package is
+// already bounded (db.MaxBranchReviewAnswers for settled questions,
+// maxPublishedConversationEntries/Chars for the PR body), so these are the
+// outliers rather than a new policy.
+//
+// Same remedy as maxReviewBotCommentFindings in ci_findings.go, and it degrades
+// the same way: dropping a question finding loses nothing, because the question
+// stays open in the conversation, the gate keeps parking, and the dropped
+// question is emitted once the others are answered.
+const (
+	maxReviewQuestionFindings      = 50
+	maxReviewQuestionDescription   = 2000
+	maxReviewQuestionPromptEntries = 50
+	maxReviewQuestionPromptChars   = 2000
+)
+
+// boundReviewQuestionText bounds one rendered question by RUNES, not bytes: a
+// question is prose the reviewer wrote, so a byte cut lands inside a multi-byte
+// rune on nothing rarer than a typographic quote, and the result would be
+// invalid UTF-8 on the event stream and in a prompt.
+func boundReviewQuestionText(s string, limit int) string {
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit]) + fmt.Sprintf("… (truncated, %d chars total)", len(runes))
+}
+
 func reviewQuestionFindingID(questionID string) string {
 	return "question-" + questionID
 }
@@ -270,7 +318,12 @@ func openReviewQuestionFindings(conv reviewqa.Conversation) []types.Finding {
 	if len(open) == 0 {
 		return nil
 	}
-	findings := make([]types.Finding, 0, len(open))
+	omitted := 0
+	if len(open) > maxReviewQuestionFindings {
+		omitted = len(open) - maxReviewQuestionFindings
+		open = open[:maxReviewQuestionFindings]
+	}
+	findings := make([]types.Finding, 0, len(open)+1)
 	for _, e := range open {
 		var b strings.Builder
 		b.WriteString("Review question awaiting an answer: ")
@@ -291,9 +344,23 @@ func openReviewQuestionFindings(conv reviewqa.Conversation) []types.Finding {
 			Severity:    types.FindingSeverityWarning,
 			File:        e.File,
 			Line:        e.Line,
-			Description: b.String(),
+			Description: boundReviewQuestionText(b.String(), maxReviewQuestionDescription),
 			Action:      types.ActionAskUser,
 			Category:    types.FindingCategoryReviewQuestion,
+		})
+	}
+	if omitted > 0 {
+		// Carries the review-question CATEGORY, so the gate still parks and no
+		// automatic resolver treats it as work, but not a "question-<id>" ID,
+		// so it is not rendered as an answerable row.
+		findings = append(findings, types.Finding{
+			ID:       "review-questions-omitted",
+			Severity: types.FindingSeverityWarning,
+			Description: fmt.Sprintf(
+				"%d further review question(s) are open and not listed here. Answer the questions above; the rest are emitted once these are settled.",
+				omitted),
+			Action:   types.ActionAskUser,
+			Category: types.FindingCategoryReviewQuestion,
 		})
 	}
 	return findings
