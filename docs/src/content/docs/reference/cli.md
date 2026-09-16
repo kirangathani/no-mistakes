@@ -251,7 +251,8 @@ no-mistakes axi answer --question q1 --answer "Keep it behind a flag" --by capta
 | `--question` | `string` | (none)             | Question ID from the review gate's `review_questions`; required          |
 | `--answer`   | `string` | (none)             | The answer, ideally one of the question's stated options; required       |
 | `--by`       | `string` | (none)             | Who answered; recorded on the PR and in the branch's settled questions   |
-| `--run`      | `string` | current-branch run | Answer against a specific run ID                                         |
+
+The run is always the current branch's active run, and there is deliberately no `--run`: `axi`'s run resolution is branch-scoped, and this command mutates, so a second selection path could land an answer meant for one branch's reviewer on another's. Run it from a clone of the repository whose run it answers - the repository is resolved from the working directory, so a directory outside any initialized repository reports `repo not initialized` rather than answering.
 
 This is not a gate response, and `axi respond` does not accept an answer. The answer is appended to the run's review conversation immediately, so a reviewer that is still working reads it at its next checkpoint and can redirect the rest of its pass. The output reports `open_questions` and `reviewer_resumed`: once no question is open, the daemon resumes that same reviewer session with the answers so it can finish its pass, rather than the caller approving or fixing to get past the gate.
 

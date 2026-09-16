@@ -124,3 +124,20 @@ func TestReviewQuestionRowsIgnoreFindingsWithNoQuestionID(t *testing.T) {
 		t.Fatalf("unparseable findings produced rows: %+v", rows)
 	}
 }
+
+// TestAxiAnswerHasNoRunFlag pins the removal. `axi`'s run resolution is
+// branch-scoped by design, and answer MUTATES: a --run would be a second
+// selection path that could land an answer meant for one branch's reviewer on
+// another's. Reintroducing the flag is a deliberate scope decision, so it
+// should have to change this test to happen.
+func TestAxiAnswerHasNoRunFlag(t *testing.T) {
+	cmd := newAxiAnswerCmd()
+	if f := cmd.Flags().Lookup("run"); f != nil {
+		t.Fatalf("axi answer must not take --run; its run is the current branch's active run")
+	}
+	for _, want := range []string{"question", "answer", "by"} {
+		if cmd.Flags().Lookup(want) == nil {
+			t.Fatalf("axi answer is missing --%s", want)
+		}
+	}
+}
