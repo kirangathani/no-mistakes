@@ -1738,7 +1738,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 // run's reviewer asked, and releases the review gate once nothing is left
 // open.
 //
-// The two outcomes are both correct and both expected:
+// The three outcomes are all correct and all expected:
 //
 //   - the reviewer is still working (no gate parked yet). The answer is
 //     durably appended and the reviewer reads it at its next checkpoint, which
@@ -1748,6 +1748,11 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 //     the last open question, types.ActionAnswer resumes the reviewer's own
 //     session with the answers. That is the push the captain required: nothing
 //     polls, and the reviewer receives a message it did not ask for.
+//   - this answer closed no question that was open before the append - an id
+//     nobody asked, or a correction sent after the last question was already
+//     answered. It is recorded and NO gate is released; see the wasOpen
+//     snapshot below, which exists because the open count alone would let such
+//     an answer steal the verdict on a gate parked on ordinary findings.
 //
 // The write happens before the release decision, so a failure to resume never
 // loses the answer - the next answer, or a recovered gate, finds it on disk.
