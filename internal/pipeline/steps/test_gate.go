@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -44,6 +43,13 @@ import (
 //     changed between H0 and this head. That verdict still describes this
 //     head's product behavior against the same acceptance criteria, so it is
 //     recorded again with a pointer to the run that earned it.
+//
+// A reused verdict is recorded AGAINST H0, never restamped onto this head: it
+// says "the product behavior these scenarios proved has not changed", which is
+// a weaker and true claim, not "these scenarios ran here". Everything that
+// asks whether a particular head was live validated keys on the recorded head,
+// so that distinction is what stops a run the agent never drove from
+// publishing a live-validation claim.
 //
 // Everything else runs the agent, and so does any failure to establish either
 // condition: the gate fails open to today's behavior rather than guessing.
@@ -219,7 +225,7 @@ func reusableBranchVerdict(sctx *pipeline.StepContext, nonProduct []string) (tes
 	}
 	if findings.TestedHeadSHA == sctx.Run.HeadSHA && !sctx.Fixing {
 		// Same head, nothing to diff.
-		return reuseDecision(sctx, prior.RunID, findings), true
+		return reuseDecision(prior.RunID, findings), true
 	}
 	rangeArg := findings.TestedHeadSHA + ".." + sctx.Run.HeadSHA
 	if sctx.Fixing {
@@ -233,7 +239,7 @@ func reusableBranchVerdict(sctx *pipeline.StepContext, nonProduct []string) (tes
 	if len(product) > 0 {
 		return testEvidenceDecision{}, false
 	}
-	return reuseDecision(sctx, prior.RunID, findings), true
+	return reuseDecision(prior.RunID, findings), true
 }
 
 // sameRunIntent reports whether two runs were validated against the same
@@ -249,21 +255,24 @@ func sameRunIntent(current *string, prior string) bool {
 	return mine != "" && mine == strings.TrimSpace(prior)
 }
 
-func reuseDecision(sctx *pipeline.StepContext, priorRunID string, prior Findings) testEvidenceDecision {
+func reuseDecision(priorRunID string, prior Findings) testEvidenceDecision {
 	reused := Findings{
 		Scenarios: prior.Scenarios,
 		Verdict:   types.TestVerdictGo,
+		// The head is the one whose product behavior these scenarios were
+		// actually driven against, carried forward rather than restamped onto
+		// this run's head. It is what keeps the reuse honest: every consumer
+		// that asks "was THIS head live validated" compares against this
+		// field, so restamping would make a run that drove nothing claim a
+		// live turn. See gatedTestOutcome.
+		TestedHeadSHA: prior.TestedHeadSHA,
 	}
 	// Reuse chains: a reused verdict is itself reusable, which is the whole
-	// point on a branch that re-runs several times. An UNCONDITIONAL evidence
-	// pointer is wrong precisely because of that. A gated run's own evidence
-	// directory is created before the gate is consulted and then left empty -
-	// nothing is written when the agent is skipped - so naming the immediate
-	// predecessor from the third run onward would send a reviewer to an empty
-	// directory as the basis for a go verdict. Only a run that actually drove
-	// the agent holds artifacts, so when the predecessor is itself a reuse we
-	// carry ITS reason forward, which keeps naming the originating run.
-	provenance := fmt.Sprintf("reused from run %s (evidence: %s)", priorRunID, priorRunEvidenceDir(sctx, priorRunID))
+	// point on a branch that re-runs several times, and only a run that
+	// actually drove the agent holds artifacts. So when the predecessor is
+	// itself a reuse we carry ITS reason forward, which keeps naming the
+	// originating run instead of the intermediate one that holds nothing.
+	provenance := fmt.Sprintf("reused from run %s", priorRunID)
 	if prior.EvidenceSource == types.TestEvidenceSourceReused {
 		provenance = carriedProvenance(prior.EvidenceReason, priorRunID)
 	}
@@ -279,26 +288,15 @@ func reuseDecision(sctx *pipeline.StepContext, priorRunID string, prior Findings
 }
 
 // carriedProvenance extracts the originating run's pointer from a reused
-// verdict's own recorded reason, so a chain keeps naming the run that holds
-// the artifacts instead of the empty directory of the run it read them from.
-// An unreadable predecessor reason names only the run id, never a directory
-// this run cannot vouch for.
+// verdict's own recorded reason, so a chain keeps naming the run that actually
+// drove the agent instead of the intermediate run it read the verdict from,
+// which holds no artifacts. An unreadable predecessor reason degrades to
+// naming the immediate predecessor, which is the most this run can vouch for.
 func carriedProvenance(priorReason, priorRunID string) string {
 	if _, carried, found := strings.Cut(priorReason, "; "); found && strings.HasPrefix(carried, "reused from run ") {
 		return carried
 	}
 	return fmt.Sprintf("reused from run %s", priorRunID)
-}
-
-// priorRunEvidenceDir names where the reused run's artifacts are on this
-// machine. Every run's evidence directory is its run ID under one shared root
-// (see Executor.runEvidenceDir), so the prior run's is this run's sibling.
-func priorRunEvidenceDir(sctx *pipeline.StepContext, priorRunID string) string {
-	dir := testEvidenceDir(sctx)
-	if dir == "" {
-		return priorRunID
-	}
-	return filepath.Join(filepath.Dir(dir), priorRunID)
 }
 
 // gatedTestOutcome builds the step outcome for a run whose live-evidence agent
@@ -326,7 +324,17 @@ func gatedTestOutcome(
 		findings.Verdict = types.TestVerdictNoSurface
 	}
 	findings.Tested = append([]string(nil), tested...)
-	findings.TestedHeadSHA = sctx.Run.HeadSHA
+	// Only stamp this run's head when the decision does not already name the
+	// head its evidence belongs to. A reused verdict carries the head its
+	// scenarios were driven at, and that difference is load-bearing:
+	// attestedLiveValidation omits live_validation entirely when the recorded
+	// head is not the published one, so a run that drove nothing publishes no
+	// live-validation claim rather than a restamped one. An automatic
+	// no-surface DOES belong to this head - it is a fact about this diff, and
+	// it carries no scenarios - so it takes the stamp.
+	if findings.TestedHeadSHA == "" {
+		findings.TestedHeadSHA = sctx.Run.HeadSHA
+	}
 	findings.EvidenceSource = gate.Source
 	findings.EvidenceReason = gate.Reason
 	findings.TestingSummary = gate.Reason

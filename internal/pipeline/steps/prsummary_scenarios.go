@@ -76,12 +76,37 @@ func collectTestingEvidenceReason(sr *db.StepResult, rounds []*db.StepRound) str
 	return ""
 }
 
+// collectTestingEvidenceSource returns the Test step's recorded evidence
+// source, or "" for a step recorded with the gate off or before it existed.
+func collectTestingEvidenceSource(sr *db.StepResult, rounds []*db.StepRound) string {
+	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
+		if raw == nil || strings.TrimSpace(*raw) == "" {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*raw)
+		if err != nil {
+			continue
+		}
+		if source := strings.TrimSpace(findings.EvidenceSource); source != "" {
+			return source
+		}
+	}
+	return ""
+}
+
 // renderLiveValidationLine is the one-line answer to "was this live
 // validated": the verdict, how much of the scenario list was actually driven
 // against the product, and - because a verdict the agent never re-derived
 // reads identically otherwise - which path the diff-class gate took to get
 // it. It returns "" when none of the three is recorded.
-func renderLiveValidationLine(scenarios []types.TestScenario, verdict, evidenceReason string) string {
+//
+// evidenceSource is what keeps the count honest. A reused verdict's scenarios
+// were driven live, but in an EARLIER run, and this line is read as a claim
+// about the commit the PR is showing. So a reuse says so in the sentence
+// rather than leaving "driven live against the product" to be read as this
+// run's work; the attestation makes the same distinction by omitting
+// live_validation for a head no agent drove.
+func renderLiveValidationLine(scenarios []types.TestScenario, verdict, evidenceReason, evidenceSource string) string {
 	live, total := types.LiveScenarioCounts(scenarios)
 	evidenceReason = strings.TrimSpace(evidenceReason)
 	if !types.IsKnownTestVerdict(verdict) && total == 0 && evidenceReason == "" {
@@ -97,7 +122,11 @@ func renderLiveValidationLine(scenarios []types.TestScenario, verdict, evidenceR
 		b.WriteString("no verdict recorded")
 	}
 	if total > 0 {
-		b.WriteString(fmt.Sprintf(" - %d of %d scenarios driven live against the product", live, total))
+		if strings.TrimSpace(evidenceSource) == types.TestEvidenceSourceReused {
+			b.WriteString(fmt.Sprintf(" - %d of %d scenarios driven live against the product in the earlier run this verdict comes from, not in this run", live, total))
+		} else {
+			b.WriteString(fmt.Sprintf(" - %d of %d scenarios driven live against the product", live, total))
+		}
 	}
 	if evidenceReason != "" {
 		b.WriteString(" (" + evidenceReason + ")")
