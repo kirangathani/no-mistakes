@@ -92,6 +92,7 @@ func reviewQuestionProtocolSection(dir string, conv reviewqa.Conversation) strin
 	var b strings.Builder
 	b.WriteString("\n\nAsking questions while you work:\n")
 	fmt.Fprintf(&b, "- You have a question channel: %s/%s (you append) and %s/%s (the operator appends). Create the directory if it does not exist.\n", dir, reviewqa.QuestionsFile, dir, reviewqa.AnswersFile)
+	fmt.Fprintf(&b, "- Creating %s and appending to those two files is an EXPLICIT exception to the workspace boundary stated above, and it is required by this protocol rather than optional. That directory is this run's own managed area, not the project's, so the boundary's out-of-worktree rule does not apply to it. Do not resolve the two instructions the other way: a reviewer that creates nothing produces a conversation indistinguishable from having had no question at all, and every question you were going to ask is lost silently.\n", dir)
 	b.WriteString("- Emit a question the MOMENT you have substantiated it. Do not hold questions to the end of the turn.\n")
 	b.WriteString("- Append one JSON object per line to " + reviewqa.QuestionsFile + `, e.g. {"id":"q1","kind":"question","question":"<the question>","options":["<option>","<option>"],"weight":"major","file":"<path>","line":<n>,"area":"<what you were reviewing>"}` + "\n")
 	b.WriteString("- Ask ONLY the larger questions - the ones you would otherwise raise as an \"ask-user\" finding: product behavior, the author's deliberate intent, access policy, or a remedy that would extend the change. Decide minor questions yourself and report them as ordinary findings or as a pass. Never emit a question with weight \"minor\"; it is dropped, not escalated.\n")
@@ -204,7 +205,11 @@ func loadBranchReviewAnswers(sctx *pipeline.StepContext) ([]db.ReviewAnswer, boo
 	}
 	answers, truncated, err := sctx.DB.GetBranchReviewAnswers(sctx.Repo.ID, branch, maxSettledQuestionsInPrompt)
 	if err != nil {
-		slog.Warn("failed to read settled review questions; continuing without them", "repo_id", sctx.Repo.ID, "error", err)
+		// An empty branch is no error at all, so reaching here means the read
+		// itself failed and every settled decision on this branch is missing
+		// from the do-not-re-raise section - the one thing that section exists
+		// to prevent. Logged at ERROR so it is not read as ordinary degradation.
+		slog.Error("failed to read settled review questions; the reviewer may re-raise a question a human already settled", "repo_id", sctx.Repo.ID, "error", err)
 		return nil, false
 	}
 	return answers, truncated
@@ -245,7 +250,7 @@ func recordAnsweredQuestions(sctx *pipeline.StepContext, conv reviewqa.Conversat
 			AnsweredAt: ask.Answer.AnsweredAt,
 		})
 		if err != nil {
-			slog.Warn("failed to record a settled review question", "run_id", sctx.Run.ID, "question", ask.Question.ID, "ask", ask.Ordinal, "error", err)
+			slog.Error("failed to record a settled review question; this human decision will not reach a later reviewer or the PR body", "run_id", sctx.Run.ID, "question", ask.Question.ID, "ask", ask.Ordinal, "error", err)
 		}
 	}
 }

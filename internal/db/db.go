@@ -40,7 +40,53 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 	}
+	if err := assertReviewQuestionsShape(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
 	return &DB{sql: sqlDB}, nil
+}
+
+// assertReviewQuestionsShape refuses a review_questions table that predates
+// ask_ordinal instead of running against it.
+//
+// There is deliberately no migration for this. The table is new, so no released
+// version ships the old shape - CREATE TABLE gives every upstream database the
+// five-column key - and migrationStatements cannot carry the remedy anyway:
+// they are re-executed with their errors TOLERATED on every start, which is
+// safe for an additive ALTER and destructive for the create/copy/drop/rename a
+// key change needs. SQLite cannot ALTER a column into a primary key.
+//
+// Only a database that ran an earlier commit of this feature's own branch can
+// have the old shape, and there the failure was silent and total: every INSERT
+// and every SELECT names ask_ordinal, so a human's settled decision reached
+// neither the do-not-re-raise section nor the PR body while nothing errored.
+// Refusing to open says so once, and the operator drops the table by hand -
+// nothing here modifies any live database.
+func assertReviewQuestionsShape(sqlDB *sql.DB) error {
+	rows, err := sqlDB.Query(`SELECT name FROM pragma_table_info('review_questions')`)
+	if err != nil {
+		return fmt.Errorf("inspect review_questions: %w", err)
+	}
+	defer rows.Close()
+	exists := false
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return fmt.Errorf("inspect review_questions: %w", err)
+		}
+		exists = true
+		if column == "ask_ordinal" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect review_questions: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	return fmt.Errorf("review_questions predates its ask_ordinal column, so every settled review answer would be silently lost; drop the table (sqlite3 <db> 'DROP TABLE review_questions') and restart to have it recreated")
 }
 
 // OpenReadOnly opens an existing database without creating or migrating it.

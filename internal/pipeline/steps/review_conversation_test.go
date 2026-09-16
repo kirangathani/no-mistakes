@@ -1069,3 +1069,41 @@ func TestSupersededSectionDoesNotClaimThePreviousRunParked(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewPromptNamesTheConversationDirectoryAsABoundaryException covers the
+// conflict inside the emitted prompt, which is the generated interface the
+// reviewer actually receives. agent.WithSteering prepends a workspace boundary
+// to every prompt whose only out-of-worktree allowance is test evidence files
+// asked for by a testing prompt - neither qualifier holds for an ndjson
+// question log in a review turn - and the protocol section then tells the
+// reviewer to create that directory and append to it.
+//
+// A reviewer resolving that toward the boundary creates nothing, and a missing
+// directory reads as an empty conversation by design: no question findings, no
+// park, and the feature degrades to the old monologue with nothing logged. So
+// the protocol section has to name the exception itself.
+func TestReviewPromptNamesTheConversationDirectoryAsABoundaryException(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := newStaticReviewAgent(cleanReviewJSON)
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	enableReviewConversation(sctx.Config)
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	prompt := lastReviewPrompt(t, ag)
+	convDir := reviewConversationDir(sctx)
+	if convDir == "" {
+		t.Fatal("no conversation directory resolved with the setting on")
+	}
+	if !strings.Contains(prompt, "EXPLICIT exception to the workspace boundary") {
+		t.Fatalf("the protocol section does not authorize the write the boundary forbids:\n%s", prompt)
+	}
+	// The exception has to name the directory it covers, or it reads as a
+	// general licence rather than one path.
+	exception := prompt[strings.Index(prompt, "EXPLICIT exception to the workspace boundary"):]
+	if line, _, _ := strings.Cut(exception, "\n"); !strings.Contains(prompt[:strings.Index(prompt, line)], convDir) {
+		t.Fatalf("the exception does not name %q:\n%s", convDir, prompt)
+	}
+}

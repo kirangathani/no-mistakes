@@ -47,6 +47,13 @@ always outside the worktree):
     answers.ndjson      # append-only, written by the operator
 ```
 
+Writing there is an explicit exception to the workspace boundary every agent
+prompt carries, and the reviewer's protocol section says so in as many words.
+The directory is the run's own managed area rather than the project's, so the
+boundary's out-of-worktree rule does not reach it - and a reviewer that resolved
+the two instructions the other way would create nothing, which reads exactly
+like having had no question to ask.
+
 Both files are newline-delimited JSON. Append-only is the whole durability
 story: a crash mid-write loses at most the trailing line, a reader can `tail -f`
 either file, and no writer ever needs a lock on something another process is
@@ -295,6 +302,15 @@ decisions; a correction to the same ask still replaces. Keyed by id alone within
 a run, answering the second `q1` would have overwritten the first's row, and the
 earlier decision would have disappeared from the section below and from the PR
 body - silently.
+
+The ask ordinal arrived with the table, so every installation's database has it.
+A *development* database created from an earlier commit of this feature's branch
+does not, and there the store cannot work at all: the daemon refuses to open
+such a database and names the remedy, which is to drop `review_questions` by
+hand (`sqlite3 <db> 'DROP TABLE review_questions'`) and let it be recreated.
+There is deliberately no migration - SQLite cannot ALTER a column into a primary
+key, and the migration list is re-run with its errors tolerated on every start,
+which a create/copy/drop/rename could not survive.
 
 Every later review turn on the same branch, in any run, receives them as a
 **Settled questions (do not re-raise)** prompt section, rendered separately from
