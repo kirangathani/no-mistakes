@@ -415,7 +415,7 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 			b.WriteString(liveValidation)
 			b.WriteString("\n")
 		}
-		if table := publishedScenarioTable(scenarios, evidenceSource, len(artifacts) > 0, opts.flavor); table != "" {
+		if table := renderScenarioTable(scenarios, opts.flavor); table != "" {
 			b.WriteString("\n")
 			b.WriteString(table)
 			b.WriteString("\n")
@@ -1582,7 +1582,7 @@ func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.F
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	if table := publishedScenarioTable(findings.Scenarios, findings.EvidenceSource, len(findings.Artifacts) > 0, flavor); table != "" {
+	if table := renderScenarioTable(findings.Scenarios, flavor); table != "" {
 		b.WriteString("\n")
 		b.WriteString(table)
 		b.WriteString("\n")

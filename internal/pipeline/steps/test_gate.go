@@ -303,27 +303,71 @@ func reuseDecision(priorRunID string, prior Findings) testEvidenceDecision {
 // this run's (see Executor.runEvidenceDir). That path is resolved here and
 // never published: it is a host filesystem path, the PR redactor only removes
 // home directories, and test.evidence.local_root may be any absolute path.
-func carryOriginEvidence(sctx *pipeline.StepContext, originRunID string) error {
+func carryOriginEvidence(sctx *pipeline.StepContext, originRunID string, artifacts []types.TestArtifact) ([]types.TestArtifact, error) {
 	originRunID = strings.TrimSpace(originRunID)
 	if originRunID == "" {
-		return errors.New("no originating run recorded")
+		return nil, errors.New("no originating run recorded")
+	}
+	// The run ID becomes one path segment under the shared evidence root, so
+	// it is validated as one rather than trusted. A findings payload is parsed
+	// by the same function whether it came from the database or from an agent
+	// turn, so a traversal here would let a turn name any directory on the
+	// host and have its contents copied into a published evidence directory.
+	// test.go clears the field on the agent path; this is the second gate.
+	if originRunID != filepath.Base(originRunID) || originRunID == "." || originRunID == ".." || strings.ContainsAny(originRunID, `/\`) {
+		return nil, fmt.Errorf("originating run %q is not a single path segment", originRunID)
 	}
 	dest := testEvidenceDir(sctx)
 	if dest == "" {
-		return errors.New("this run has no evidence directory")
+		return nil, errors.New("this run has no evidence directory")
 	}
 	src := filepath.Join(filepath.Dir(dest), originRunID)
 	entries, err := os.ReadDir(src)
 	if err != nil {
-		return fmt.Errorf("read the originating run's evidence: %w", err)
+		return nil, fmt.Errorf("read the originating run's evidence: %w", err)
 	}
 	if len(entries) == 0 {
-		return errors.New("the originating run's evidence directory is empty")
+		return nil, errors.New("the originating run's evidence directory is empty")
 	}
 	if err := copyDirContents(src, dest); err != nil {
-		return fmt.Errorf("copy the originating run's evidence: %w", err)
+		return nil, fmt.Errorf("copy the originating run's evidence: %w", err)
 	}
-	return nil
+	return rebaseCarriedArtifacts(artifacts, src, dest)
+}
+
+// rebaseCarriedArtifacts points each carried artifact at its copy in THIS
+// run's evidence directory.
+//
+// The paths matter as much as the files. The evidence prompt tells the agent
+// to record paths exactly where it created them, so a real file artifact is
+// absolute under the originating run's directory - and the PR renderer accepts
+// an absolute artifact path only when it resolves under the repository root or
+// under THIS run's evidence directory (sanitizeAbsoluteArtifactPath). Carrying
+// the paths unchanged therefore drops every one of them at render time, which
+// silently defeats the whole carry. An absolute path outside the originating
+// directory is dropped instead of rewritten: nothing copied it, so no file
+// backs it here.
+func rebaseCarriedArtifacts(artifacts []types.TestArtifact, src, dest string) ([]types.TestArtifact, error) {
+	rebased := make([]types.TestArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		path := strings.TrimSpace(artifact.Path)
+		if path == "" || !filepath.IsAbs(path) {
+			// A relative path is recorded relative to the evidence directory
+			// itself, so the copy already put a file where it points.
+			rebased = append(rebased, artifact)
+			continue
+		}
+		rel, err := filepath.Rel(src, filepath.Clean(path))
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		artifact.Path = filepath.Join(dest, rel)
+		rebased = append(rebased, artifact)
+	}
+	if len(rebased) == 0 {
+		return nil, errors.New("no carried artifact resolves inside the originating run's evidence directory")
+	}
+	return rebased, nil
 }
 
 // gatedTestOutcome builds the step outcome for a run whose live-evidence agent
@@ -373,10 +417,22 @@ func gatedTestOutcome(
 	// scenario table with it, so the body never cites a file it does not
 	// carry. Retention (default 14 days) ages evidence directories out, so a
 	// missing source is expected rather than exceptional.
+	// Only a verdict that HAS file artifacts needs them carried. One that
+	// evidenced its scenarios with commands rather than files has nothing to
+	// copy and nothing to suppress, so its table renders as it always did.
 	if len(findings.Artifacts) > 0 {
-		if err := carryOriginEvidence(sctx, findings.EvidenceOriginRunID); err != nil {
+		carried, err := carryOriginEvidence(sctx, findings.EvidenceOriginRunID, findings.Artifacts)
+		if err != nil {
+			// Nothing backs the scenarios here, so they go with their
+			// artifacts: the verdict line and the reuse reason still name the
+			// run that holds the evidence, and no table cites a file this PR
+			// cannot show. Retention ages evidence directories out, so this
+			// is an ordinary outcome rather than an error for the run.
 			sctx.Log(fmt.Sprintf("could not carry run %s's evidence forward (%v); publishing the verdict without its scenario table", findings.EvidenceOriginRunID, err))
 			findings.Artifacts = nil
+			findings.Scenarios = nil
+		} else {
+			findings.Artifacts = carried
 		}
 	}
 	findings.TestingSummary = gate.Reason

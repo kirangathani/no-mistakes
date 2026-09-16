@@ -156,16 +156,15 @@ func TestReuseReasonNamesTheRunNotAHostPath(t *testing.T) {
 // The reuse path exists to avoid re-deriving evidence, not to publish a
 // verdict with nothing behind it. So a reused verdict carries the originating
 // run's artifacts, and gatedTestOutcome copies that run's evidence directory
-// into this run's - the only directory publication reads - so the scenario
-// table's citations still resolve.
-func TestReuseCarriesTheOriginatingRunsArtifactsAndEvidenceFiles(t *testing.T) {
+// into this run's - the only directory publication reads.
+func TestReuseCarriesTheOriginatingRunsArtifacts(t *testing.T) {
 	prior := Findings{
 		TestedHeadSHA: reusedDrivenHeadSHA,
 		Scenarios:     []types.TestScenario{{Name: "s", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"}},
-		Artifacts:     []types.TestArtifact{{Label: "checkout", Path: "checkout.png"}},
+		Artifacts:     []types.TestArtifact{{Label: "checkout", Path: "/evidence/run-1/checkout.png"}},
 	}
 	decision := reuseDecision("run-1", prior)
-	if len(decision.Reused.Artifacts) != 1 || decision.Reused.Artifacts[0].Path != "checkout.png" {
+	if len(decision.Reused.Artifacts) != 1 {
 		t.Fatalf("artifacts = %+v, want the originating run's list carried forward", decision.Reused.Artifacts)
 	}
 	if decision.Reused.EvidenceOriginRunID != "run-1" {
@@ -188,60 +187,121 @@ func TestReuseCarriesTheOriginatingRunsArtifactsAndEvidenceFiles(t *testing.T) {
 	}
 }
 
-// carryOriginEvidence is the copy itself. Its failure modes are ordinary -
-// retention ages directories out - so each one has to be a clean error the
-// caller can turn into "publish the verdict without the table", never a panic
-// and never a silent success.
-func TestCarryOriginEvidence(t *testing.T) {
+// A carried artifact's recorded path decides whether it survives rendering at
+// all: sanitizeAbsoluteArtifactPath accepts an absolute path only under the
+// repository root or under THIS run's evidence directory, and the evidence
+// prompt has the agent record paths exactly where it wrote them - absolute,
+// under the ORIGINATING run's directory. Carrying those paths unchanged drops
+// every artifact at render time and silently defeats the carry, so the
+// rebasing is the part that has to be pinned.
+func TestCarriedArtifactPathsPointAtThisRunsCopy(t *testing.T) {
 	root := t.TempDir()
+	src := filepath.Join(root, "run-1")
 	dest := filepath.Join(root, "run-2")
-	if err := os.MkdirAll(dest, 0o755); err != nil {
+	for _, dir := range []string{src, dest} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(src, "checkout.png"), []byte("png"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sctx := &pipeline.StepContext{EvidenceDir: dest}
 
-	if err := carryOriginEvidence(sctx, ""); err == nil {
-		t.Error("an unrecorded originating run must be an error")
+	carried, err := carryOriginEvidence(sctx, "run-1", []types.TestArtifact{
+		{Label: "absolute under the origin", Path: filepath.Join(src, "checkout.png")},
+		{Label: "relative to the evidence dir", Path: "token.png"},
+		{Label: "absolute somewhere else", Path: filepath.Join(root, "elsewhere", "secret.png")},
+	})
+	if err != nil {
+		t.Fatalf("carrying evidence forward: %v", err)
 	}
-	if err := carryOriginEvidence(sctx, "run-1"); err == nil {
-		t.Error("a missing originating directory must be an error, not a silent success")
+	if len(carried) != 2 {
+		t.Fatalf("carried = %+v, want the origin-relative and relative artifacts only", carried)
 	}
-
-	src := filepath.Join(root, "run-1")
-	if err := os.MkdirAll(src, 0o755); err != nil {
-		t.Fatal(err)
+	if want := filepath.Join(dest, "checkout.png"); carried[0].Path != want {
+		t.Errorf("absolute artifact path = %q, want it rebased onto this run at %q", carried[0].Path, want)
 	}
-	if err := carryOriginEvidence(sctx, "run-1"); err == nil {
-		t.Error("an empty originating directory must be an error")
+	if carried[1].Path != "token.png" {
+		t.Errorf("relative artifact path = %q, want it untouched", carried[1].Path)
 	}
-
-	if err := os.WriteFile(filepath.Join(src, "checkout.png"), []byte("\x89PNG"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := carryOriginEvidence(sctx, "run-1"); err != nil {
-		t.Fatalf("carrying a populated directory forward: %v", err)
+	for _, a := range carried {
+		if strings.Contains(a.Path, "secret.png") {
+			t.Errorf("an artifact outside the originating directory was kept: %+v", a)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(dest, "checkout.png")); err != nil {
 		t.Fatalf("evidence file did not reach this run's directory: %v", err)
 	}
 }
 
-// The table and its evidence stand or fall together: it renders when the
-// artifacts were carried, and is dropped when they could not be, so a PR never
-// cites a file it does not carry. A freshly driven run is unaffected either
-// way, including one whose scenarios cite commands rather than files.
-func TestPublishedScenarioTableFollowsTheCarriedArtifacts(t *testing.T) {
-	scenarios := []types.TestScenario{{Name: "checkout", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"}}
-
-	if table := publishedScenarioTable(scenarios, types.TestEvidenceSourceReused, true, prBodyMarkdown); table == "" {
-		t.Error("a reuse whose artifacts were carried must still show its scenario table")
-	}
-	if table := publishedScenarioTable(scenarios, types.TestEvidenceSourceReused, false, prBodyMarkdown); table != "" {
-		t.Errorf("a reuse with no carried artifacts must not cite evidence it lacks:\n%s", table)
-	}
-	for _, source := range []string{types.TestEvidenceSourceAgent, types.TestEvidenceSourceNoProductChange, ""} {
-		if table := publishedScenarioTable(scenarios, source, false, prBodyMarkdown); table == "" {
-			t.Errorf("source %q must render its table regardless of artifacts", source)
+// carryOriginEvidence joins the recorded run ID into a filesystem path, and a
+// findings payload is parsed by the same function whether it came from the
+// database or from an agent turn, so a traversal there would have any
+// directory on the host copied into a published evidence directory. The value
+// is validated as one path segment, and test.go clears it on the agent path.
+//
+// The layout matters for this to test anything: run directories are siblings
+// under one evidence root, so an escaping ID reaches a sibling OF THAT ROOT.
+// A decoy planted inside the root is never reached, and the case then passes
+// on a failed ReadDir whether the validation exists or not.
+func TestCarryOriginEvidenceRefusesATraversingRunID(t *testing.T) {
+	host := t.TempDir()
+	evidenceRoot := filepath.Join(host, "evidence")
+	dest := filepath.Join(evidenceRoot, "run-2")
+	secrets := filepath.Join(host, "secrets")
+	for _, dir := range []string{dest, secrets} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(secrets, "id_rsa"), []byte("PRIVATE KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sctx := &pipeline.StepContext{EvidenceDir: dest}
+
+	// Proof the decoy is actually reachable by the traversal this refuses:
+	// without the guard, this is the directory the copy would read.
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dest), "../secrets", "id_rsa")); err != nil {
+		t.Fatalf("the traversal target must be reachable or this case proves nothing: %v", err)
+	}
+
+	for _, id := range []string{"../secrets", "..", ".", "sub/dir", "  "} {
+		if _, err := carryOriginEvidence(sctx, id, []types.TestArtifact{{Path: "x.png"}}); err == nil {
+			t.Errorf("originating run %q was accepted as a path segment", id)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dest, "id_rsa")); err == nil {
+		t.Fatal("a traversing run ID copied a file from outside the evidence root")
+	}
+}
+
+// The ordinary failure modes are not exceptional - retention ages evidence
+// directories out - so each has to be a clean error the caller turns into
+// "publish the verdict without its scenario table", never a silent success.
+func TestCarryOriginEvidenceFailureModes(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "run-2")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sctx := &pipeline.StepContext{EvidenceDir: dest}
+	artifacts := []types.TestArtifact{{Path: "x.png"}}
+
+	if _, err := carryOriginEvidence(sctx, "", artifacts); err == nil {
+		t.Error("an unrecorded originating run must be an error")
+	}
+	if _, err := carryOriginEvidence(sctx, "run-1", artifacts); err == nil {
+		t.Error("a missing originating directory must be an error, not a silent success")
+	}
+	src := filepath.Join(root, "run-1")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := carryOriginEvidence(sctx, "run-1", artifacts); err == nil {
+		t.Error("an empty originating directory must be an error")
+	}
+	if _, err := carryOriginEvidence(&pipeline.StepContext{}, "run-1", artifacts); err == nil {
+		t.Error("a run with no evidence directory must be an error")
 	}
 }
