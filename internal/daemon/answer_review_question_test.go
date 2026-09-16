@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,26 @@ func answerFixtureWithConversation(t *testing.T, conversation bool) (*RunManager
 	return m, p, runID
 }
 
+// appendAgentQuestionLine appends one verbatim questions.ndjson line, standing
+// in for the reviewer's own file tools - the only writer of that file in
+// production, since internal/reviewqa deliberately owns no question writer. The
+// raw JSON keeps the shape under test visible, including the fields the
+// reviewer's prompt leaves out of its worked example.
+func appendAgentQuestionLine(t *testing.T, dir, line string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, reviewqa.QuestionsFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func conversationDir(p *paths.Paths, runID string) string {
 	return reviewqa.Dir(p.RunEvidenceDir("", runID))
 }
@@ -55,11 +76,9 @@ func TestAnswerReviewQuestionRecordsBeforeItDecidesToRelease(t *testing.T) {
 	m, p, runID := answerFixture(t)
 	dir := conversationDir(p, runID)
 	for _, id := range []string{"q1", "q2"} {
-		if err := reviewqa.AppendQuestion(dir, reviewqa.Question{
-			ID: id, Question: "question " + id, Options: []string{"a", "b"},
-		}); err != nil {
-			t.Fatalf("append question: %v", err)
-		}
+		// No asked_at: the reviewer's prompt never mentions one, so its own
+		// lines do not carry it.
+		appendAgentQuestionLine(t, dir, fmt.Sprintf(`{"id":%q,"kind":"question","question":"question %s","options":["a","b"],"weight":"major"}`, id, id))
 	}
 
 	// First answer: one question still open, so the gate is deliberately not
@@ -118,11 +137,7 @@ func TestAnswerReviewQuestionRecordsBeforeItDecidesToRelease(t *testing.T) {
 func TestAnswerReviewQuestionCorrectionReplacesTheEarlierAnswer(t *testing.T) {
 	m, p, runID := answerFixture(t)
 	dir := conversationDir(p, runID)
-	if err := reviewqa.AppendQuestion(dir, reviewqa.Question{
-		ID: "q1", Question: "keep it?", Options: []string{"keep", "drop"},
-	}); err != nil {
-		t.Fatalf("append question: %v", err)
-	}
+	appendAgentQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep it?","options":["keep","drop"],"weight":"major"}`)
 	for _, answer := range []string{"keep", "drop, on reflection"} {
 		if _, err := m.HandleAnswerReviewQuestion(runID, "q1", answer, "captain"); err != nil {
 			t.Fatalf("answer: %v", err)
@@ -197,11 +212,7 @@ func TestAnswerReviewQuestionRefusesWhenTheConversationIsOff(t *testing.T) {
 
 	// Seeded exactly as the enabled path would seed it, so the refusal is the
 	// setting's doing rather than an empty channel's.
-	if err := reviewqa.AppendQuestion(conversationDir(p, runID), reviewqa.Question{
-		ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
-	}); err != nil {
-		t.Fatalf("seed question: %v", err)
-	}
+	appendAgentQuestionLine(t, conversationDir(p, runID), `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
 
 	result, err := m.HandleAnswerReviewQuestion(runID, "q1", "keep", "captain")
 	if err == nil {
@@ -354,13 +365,19 @@ func TestAnswerReviewQuestionDuplicateAnswerLeavesAParkedGateAlone(t *testing.T)
 	m, p, runID, exec := liveParkedGateFixture(t)
 	dir := conversationDir(p, runID)
 
-	if err := reviewqa.AppendQuestion(dir, reviewqa.Question{
-		ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
-	}); err != nil {
-		t.Fatalf("seed question: %v", err)
-	}
+	// Trimmed to the fields the prompt calls required - no kind, no weight -
+	// which is the other shape a model following that prompt produces.
+	appendAgentQuestionLine(t, dir, `{"id":"q1","question":"keep the legacy route?","options":["keep","remove"]}`)
 	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{ID: "q1", Answer: "keep"}); err != nil {
 		t.Fatalf("seed answer: %v", err)
+	}
+	// Assert the precondition rather than assuming it: an empty conversation
+	// also has nothing open, so a seed the reader discarded would let this
+	// test pass without ever exercising a duplicate answer.
+	if seeded, err := reviewqa.Load(dir); err != nil {
+		t.Fatal(err)
+	} else if len(seeded.Answered()) != 1 {
+		t.Fatalf("seeded question did not read back as answered: %+v", seeded)
 	}
 
 	// q1 is already closed, so this resend closes nothing.

@@ -8,6 +8,26 @@ import (
 	"testing"
 )
 
+// appendQuestionLine appends ONE verbatim questions.ndjson line, which is the
+// only way that file is ever written in production: the reviewer agent appends
+// it with its own file tools, so there is no Go writer to reuse. Fixtures spell
+// the JSON out so the shape under test - in particular which fields are ABSENT
+// - is visible at the call site.
+func appendQuestionLine(t *testing.T, dir, line string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, QuestionsFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func write(t *testing.T, dir, name string, lines ...string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -147,11 +167,15 @@ func TestMalformedMinorAndOrphanLinesAreNotedNotFatal(t *testing.T) {
 	}
 }
 
-func TestAppendRoundTripsAndValidates(t *testing.T) {
+// TestAppendAnswerRoundTripsAndValidates covers the one writer this package
+// owns. There is deliberately no question-writing counterpart: the reviewer
+// appends questions itself (see the package comment), so the question side's
+// contract is the READER's tolerance, covered by the Load tests.
+func TestAppendAnswerRoundTripsAndValidates(t *testing.T) {
 	dir := Dir(t.TempDir())
-	if err := AppendQuestion(dir, Question{ID: "q1", Question: "keep /v1?", Options: []string{"keep", "drop"}}); err != nil {
-		t.Fatalf("AppendQuestion: %v", err)
-	}
+	// The line the reviewer's prompt actually produces: no asked_at, which
+	// nothing in that prompt mentions.
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep /v1?","options":["keep","drop"],"weight":"major"}`)
 	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "drop", AnsweredBy: "captain"}); err != nil {
 		t.Fatalf("AppendAnswer: %v", err)
 	}
@@ -163,23 +187,23 @@ func TestAppendRoundTripsAndValidates(t *testing.T) {
 		t.Fatalf("conversation = %+v", conv)
 	}
 	entry := conv.Answered()[0]
-	if entry.Weight != WeightMajor || entry.AskedAt == "" || entry.Answer.AnsweredAt == "" {
-		t.Fatalf("defaults not applied: %+v", entry)
+	if entry.AskedAt != "" {
+		t.Fatalf("asked_at was not on the line, so nothing may invent one: %+v", entry)
+	}
+	if entry.Answer.AnsweredAt == "" {
+		t.Fatalf("answered_at default not applied: %+v", entry.Answer)
 	}
 
-	if err := AppendQuestion(dir, Question{Question: "no id"}); err == nil {
-		t.Fatal("want error for a question with no id")
-	}
-	if err := AppendQuestion(dir, Question{ID: "q2"}); err == nil {
-		t.Fatal("want error for a question with no text")
-	}
 	if err := AppendAnswer(dir, Answer{ID: "q2"}); err == nil {
 		t.Fatal("want error for an answer with no text")
+	}
+	if err := AppendAnswer(dir, Answer{Answer: "x"}); err == nil {
+		t.Fatal("want error for an answer with no question id")
 	}
 	if err := AppendAnswer("", Answer{ID: "q2", Answer: "x"}); err == nil {
 		t.Fatal("want error for an unset directory")
 	}
-	if err := AppendQuestion(dir, Question{ID: "big", Question: strings.Repeat("x", maxLineBytes)}); err == nil {
+	if err := AppendAnswer(dir, Answer{ID: "big", Answer: strings.Repeat("x", maxLineBytes)}); err == nil {
 		t.Fatal("want error for an overlong line")
 	}
 }
@@ -231,11 +255,8 @@ func TestDirIsUnderTheRunEvidenceDirectory(t *testing.T) {
 func TestLoadSupersedingQuestionReopensAnAnsweredEntry(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := AppendQuestion(dir, Question{
-		ID: "q1", Question: "keep the legacy /v1 route?", Options: []string{"keep", "remove"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	// The prompt's worked example, minus asked_at, which it never mentions.
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy /v1 route?","options":["keep","remove"],"weight":"major"}`)
 	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain"}); err != nil {
 		t.Fatal(err)
 	}
@@ -247,12 +268,11 @@ func TestLoadSupersedingQuestionReopensAnAnsweredEntry(t *testing.T) {
 		t.Fatalf("answered question is not settled: open=%d answered=%d", len(conv.Open()), len(conv.Answered()))
 	}
 
-	// A later turn reuses the id for a different question.
-	if err := AppendQuestion(dir, Question{
-		ID: "q1", Question: "should the new /v3 route answer too?", Options: []string{"yes", "no"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	// A later turn reuses the id for a different question, and this time the
+	// model trims the example down to the fields it was told are required -
+	// no kind, no weight - which the reader must still take as a major
+	// question rather than skipping or dropping it.
+	appendQuestionLine(t, dir, `{"id":"q1","question":"should the new /v3 route answer too?","options":["yes","no"]}`)
 	conv, err = Load(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -290,22 +310,14 @@ func TestLoadSupersedingQuestionReopensAnAnsweredEntry(t *testing.T) {
 // retraction.
 func TestLoadReAskAfterRetractionComesBackOpen(t *testing.T) {
 	dir := t.TempDir()
-	for _, q := range []Question{
-		{ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"}},
-		{ID: "q1", Kind: KindRetract, Reason: "the migration note answers it"},
-	} {
-		if err := AppendQuestion(dir, q); err != nil {
-			t.Fatal(err)
-		}
-	}
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
+	// The retraction exactly as the prompt spells it: no `at`, which the
+	// deleted Go writer used to supply.
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"retract","reason":"the migration note answers it"}`)
 	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "keep"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := AppendQuestion(dir, Question{
-		ID: "q1", Question: "keep the legacy route after all?", Options: []string{"keep", "remove"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy route after all?","options":["keep","remove"],"weight":"major"}`)
 	conv, err := Load(dir)
 	if err != nil {
 		t.Fatal(err)

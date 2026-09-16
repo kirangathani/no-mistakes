@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -42,9 +43,7 @@ func TestReviewStep_ResumeApprovalGateOnlyWhenTheConversationIsSettled(t *testin
 			conversation: true,
 			findings:     openQuestionGateFindings,
 			seed: func(t *testing.T, dir string) {
-				if err := reviewqa.AppendQuestion(dir, reviewqa.Question{
-					ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
-				}); err != nil {
+				if err := appendAgentQuestionLine(dir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -129,9 +128,7 @@ func TestReviewStep_AnswerRacingTheParkStillReachesTheReviewer(t *testing.T) {
 		if turn == 1 {
 			// The asking turn emits a question and leaves it OPEN, so the step
 			// genuinely parks on it.
-			if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-				ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
-			}); err != nil {
+			if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`); err != nil {
 				t.Errorf("append question: %v", err)
 			}
 		}
@@ -186,12 +183,23 @@ func TestReviewStep_AnswerRacingTheParkStillReachesTheReviewer(t *testing.T) {
 
 func appendQA(t *testing.T, dir, id, answer string) {
 	t.Helper()
-	if err := reviewqa.AppendQuestion(dir, reviewqa.Question{
-		ID: id, Question: "keep the legacy route?", Options: []string{"keep", "remove"},
-	}); err != nil {
+	// No kind and no weight, the shape a model that trimmed the prompt's
+	// worked example produces; the reader must still take it as a major
+	// question.
+	if err := appendAgentQuestionLine(dir, fmt.Sprintf(`{"id":%q,"question":"keep the legacy route?","options":["keep","remove"]}`, id)); err != nil {
 		t.Fatal(err)
 	}
 	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{ID: id, Answer: answer, AnsweredBy: "captain"}); err != nil {
 		t.Fatal(err)
+	}
+	// Assert the seed TOOK. "Nothing is open" is also true of a conversation
+	// the reader threw away, so without this a subtest expecting a settled
+	// question would pass on a dropped one.
+	conv, err := reviewqa.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conv.Answered()) != 1 || conv.Answered()[0].ID != id {
+		t.Fatalf("seeded question %q did not read back as answered: %+v", id, conv)
 	}
 }

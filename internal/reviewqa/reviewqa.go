@@ -10,6 +10,14 @@
 // per run would be a process, a handshake and a per-adapter support matrix for
 // a capability the agent already has.
 //
+// So this package deliberately writes ANSWERS only (AppendAnswer, for the
+// daemon's answer handler) and never questions: the reviewer is the sole writer
+// of questions.ndjson, and every field its prompt's worked example omits -
+// asked_at always, kind and weight whenever the model trims the example - has
+// to be absent-tolerant on the READ side. A Go writer here would have defaulted
+// those fields and left the tolerant branches unexercised, so tests append the
+// raw lines the agent actually emits instead.
+//
 // User-facing semantics are owned by
 // docs/src/content/docs/concepts/review-conversation.md.
 package reviewqa
@@ -275,33 +283,6 @@ func Load(dir string) (Conversation, error) {
 		conv.Notes = append(conv.Notes, "review conversation file exceeded its size bound; older lines were not read")
 	}
 	return conv, nil
-}
-
-// AppendQuestion appends one question or retraction, creating the directory on
-// first use. It is the writer used by the pipeline's own tests and by any
-// future tool use; the reviewer agent writes the same lines with its own file
-// tools.
-func AppendQuestion(dir string, q Question) error {
-	if strings.TrimSpace(q.ID) == "" {
-		return errors.New("review question requires an id")
-	}
-	if strings.TrimSpace(q.Kind) == "" {
-		q.Kind = KindQuestion
-	}
-	if q.Kind == KindQuestion {
-		if strings.TrimSpace(q.Question) == "" {
-			return errors.New("review question requires question text")
-		}
-		if strings.TrimSpace(q.Weight) == "" {
-			q.Weight = WeightMajor
-		}
-		if strings.TrimSpace(q.AskedAt) == "" {
-			q.AskedAt = time.Now().UTC().Format(time.RFC3339)
-		}
-	} else if strings.TrimSpace(q.At) == "" {
-		q.At = time.Now().UTC().Format(time.RFC3339)
-	}
-	return appendLine(dir, QuestionsFile, q)
 }
 
 // AppendAnswer appends one answer, creating the directory on first use.

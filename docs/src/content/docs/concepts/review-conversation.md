@@ -52,6 +52,15 @@ story: a crash mid-write loses at most the trailing line, a reader can `tail -f`
 either file, and no writer ever needs a lock on something another process is
 reading. `internal/reviewqa` owns the shape and is the only parser.
 
+Only `id` and `question` are load-bearing on a question line. The reviewer is
+the sole writer of `questions.ndjson` - it appends with its own file tools, and
+there is no Go writer for that file - so every other field is optional on read:
+`kind` defaults to `question` when absent, an absent `weight` is treated as
+`major` (only an explicit `minor` is dropped), and `asked_at` is never read at
+all, since a re-ask is detected by counting asks against answers rather than by
+comparing timestamps. A line that omits them is the normal case, not a
+degraded one.
+
 Because the files live in the run's evidence directory, an operator who has
 opted into [`test.evidence.store_in_repo`](/no-mistakes/reference/repo-config/)
 publishes them along with the run's other evidence. That is the same content the

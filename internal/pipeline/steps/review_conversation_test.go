@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,26 @@ func withReviewConversation(sctx *pipeline.StepContext) *pipeline.StepContext {
 	return sctx
 }
 
+// appendAgentQuestionLine appends one verbatim questions.ndjson line, standing
+// in for the reviewer's own file tools. That is the only writer this file has
+// in production - internal/reviewqa deliberately owns no question writer - so a
+// fixture must supply the raw shape the agent emits, including the fields its
+// prompt's worked example leaves out. It returns an error rather than taking
+// *testing.T so it can be used inside a mock agent's own run function, which
+// signals failure by returning one.
+func appendAgentQuestionLine(dir, line string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, reviewqa.QuestionsFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(line + "\n")
+	return err
+}
+
 // TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers proves the
 // whole point of emitting questions while the reviewer works: the reviewer
 // finishes the pass it CAN do, the question it could not settle lands in the
@@ -57,14 +78,9 @@ func TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers(t *testing.T) 
 	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		// Stand in for the reviewer's own file tools: emit the question the
 		// moment it is substantiated, then carry on and return findings.
-		if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-			ID:       "q1",
-			Question: "Should the legacy /v1 route keep answering?",
-			Options:  []string{"Keep answering", "Remove it"},
-			File:     "internal/api/router.go",
-			Line:     88,
-			Area:     "routing",
-		}); err != nil {
+		// The prompt's worked example verbatim. It carries no asked_at,
+		// because nothing in that prompt mentions one.
+		if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"Should the legacy /v1 route keep answering?","options":["Keep answering","Remove it"],"weight":"major","file":"internal/api/router.go","line":88,"area":"routing"}`); err != nil {
 			return nil, err
 		}
 		return &agent.Result{Output: []byte(
@@ -128,14 +144,12 @@ func TestReviewStep_RetractedQuestionDoesNotPark(t *testing.T) {
 	var convDir string
 	ag := &mockAgent{}
 	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-			ID: "q1", Question: "does the migration cover this?", Options: []string{"yes", "no"},
-		}); err != nil {
+		if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"does the migration cover this?","options":["yes","no"],"weight":"major"}`); err != nil {
 			return nil, err
 		}
-		if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-			ID: "q1", Kind: reviewqa.KindRetract, Reason: "the migration note answers it",
-		}); err != nil {
+		// The retraction exactly as the prompt spells it: id, kind, reason,
+		// and no `at`.
+		if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"retract","reason":"the migration note answers it"}`); err != nil {
 			return nil, err
 		}
 		return &agent.Result{Output: []byte(cleanReviewJSON)}, nil
@@ -170,9 +184,9 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 		}
 		turn++
 		if turn == 1 {
-			if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-				ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
-			}); err != nil {
+			// A model that trimmed the example to the fields it was told are
+			// required: no kind, no weight, no asked_at.
+			if err := appendAgentQuestionLine(convDir, `{"id":"q1","question":"keep the legacy route?","options":["keep","remove"]}`); err != nil {
 				t.Errorf("append question: %v", err)
 			}
 			return &agent.Result{Output: []byte(cleanReviewJSON)}
@@ -279,9 +293,7 @@ func TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout(t *testin
 		}
 		turn++
 		if turn == 1 {
-			if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-				ID: "q1", Question: "keep it?", Options: []string{"keep", "drop"},
-			}); err != nil {
+			if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"keep it?","options":["keep","drop"],"weight":"major"}`); err != nil {
 				return nil, err
 			}
 		}
@@ -462,11 +474,11 @@ func TestBuildReviewConversationSection(t *testing.T) {
 		t.Fatalf("record answer: %v", err)
 	}
 	convDir := reviewConversationDir(sctx)
-	for _, q := range []reviewqa.Question{
-		{ID: "q3", Question: "does the migration cover this?", Options: []string{"yes", "no"}},
-		{ID: "q3", Kind: reviewqa.KindRetract, Reason: "the migration note answers it"},
+	for _, line := range []string{
+		`{"id":"q3","kind":"question","question":"does the migration cover this?","options":["yes","no"],"weight":"major"}`,
+		`{"id":"q3","kind":"retract","reason":"the migration note answers it"}`,
 	} {
-		if err := reviewqa.AppendQuestion(convDir, q); err != nil {
+		if err := appendAgentQuestionLine(convDir, line); err != nil {
 			t.Fatalf("append question: %v", err)
 		}
 	}
@@ -474,9 +486,7 @@ func TestBuildReviewConversationSection(t *testing.T) {
 	// A question a human approved the gate over: the review step never
 	// completes on its own with one open, but approval can, and that is the
 	// line a reader of the PR most needs.
-	if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-		ID: "q4", Question: "is widening this scope intended?", Options: []string{"yes", "no"},
-	}); err != nil {
+	if err := appendAgentQuestionLine(convDir, `{"id":"q4","question":"is widening this scope intended?","options":["yes","no"]}`); err != nil {
 		t.Fatalf("append question: %v", err)
 	}
 
@@ -599,9 +609,7 @@ func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T)
 				)}
 			}
 			if reviewTurn == 2 {
-				if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-					ID: "q1", Question: "was the fix meant to change this behaviour?", Options: []string{"yes", "no"},
-				}); err != nil {
+				if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"was the fix meant to change this behaviour?","options":["yes","no"],"weight":"major"}`); err != nil {
 					t.Errorf("append question: %v", err)
 				}
 			}
@@ -812,9 +820,7 @@ func TestReviewStep_ConversationOffIgnoresQuestionsAlreadyOnDisk(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
 	// Written as the enabled path would write it, then the setting is off.
-	if err := reviewqa.AppendQuestion(reviewqa.Dir(sctx.EvidenceDir), reviewqa.Question{
-		ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
-	}); err != nil {
+	if err := appendAgentQuestionLine(reviewqa.Dir(sctx.EvidenceDir), `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`); err != nil {
 		t.Fatalf("seed question: %v", err)
 	}
 	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
