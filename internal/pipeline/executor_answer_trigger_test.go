@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,5 +115,52 @@ func TestExecutor_RecoveredAnswerRoundIsTriggeredAsAnAnswer(t *testing.T) {
 	// An answer is not a fix round, and nothing else may reclassify it as one.
 	if rounds[1].IsFixRound() {
 		t.Fatal("the recovered answer round reads as a fix round")
+	}
+}
+
+// TestExecutor_AnswerActionIsRefusedForAnyStepButReview drives the guard that
+// keeps the answer action review-scoped.
+//
+// Only the review step owns a question channel, so any other step receiving
+// this action would re-execute with review semantics it does not implement -
+// SkipFixExecution, FinalizingAnswers and an "answer" round on a step that has
+// no reviewer to resume. It therefore fails closed.
+//
+// This replaces a test that asserted only that types.ActionAnswer differs from
+// the two verdict constants, which could not fail for any change to the
+// behavior its name claimed: deleting the guard entirely left every test in the
+// tree green.
+func TestExecutor_AnswerActionIsRefusedForAnyStepButReview(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := newApprovalStep(types.StepDocument, `{"findings":[{"id":"d-1","severity":"warning","description":"waiting","action":"ask-user"}],"summary":"1 issue"}`)
+	exec := NewExecutor(database, p, &config.Config{}, newFakeSessionAgent(), []Step{step}, nil)
+
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, t.TempDir()) }()
+	waitForStepStatus(t, database, run.ID, types.StepDocument, types.StepStatusAwaitingApproval)
+
+	if err := exec.Respond(types.StepDocument, types.ActionAnswer, nil); err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "only a review response") {
+			t.Fatalf("Execute() error = %v, want the answer action refused for a non-review step", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run neither failed nor completed after an out-of-scope answer")
+	}
+
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunFailed {
+		t.Fatalf("run status = %s, want %s: an out-of-scope answer must fail closed", got.Status, types.RunFailed)
+	}
+	// It failed instead of re-executing the step with review semantics.
+	if n := step.callCount(); n != 1 {
+		t.Fatalf("step executed %d times, want 1: the refused answer must not re-run it", n)
 	}
 }

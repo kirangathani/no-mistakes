@@ -193,14 +193,6 @@ func TestAnswerReviewQuestionForAnUnknownQuestionDoesNotOpenOne(t *testing.T) {
 	}
 }
 
-// The handler is review-scoped by construction: it is the only sender of
-// types.ActionAnswer, and the executor refuses that action for any other step.
-func TestAnswerActionIsReviewScoped(t *testing.T) {
-	if types.ActionAnswer == types.ActionApprove || types.ActionAnswer == types.ActionFix {
-		t.Fatal("the answer action must be distinct from a gate verdict")
-	}
-}
-
 // TestAnswerReviewQuestionRefusesWhenTheConversationIsOff is the opt-in half of
 // the answer channel. A repository that has not set review.conversation has no
 // reviewer that was ever told to ask, so an answer has nothing to settle and
