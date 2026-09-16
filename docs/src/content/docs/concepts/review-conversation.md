@@ -183,6 +183,13 @@ whose category is `review-question`, which means:
   agent turn in flight: the turn ended before the park, and the finalize turn
   is a fresh invocation with a fresh deadline from `reviewAgentContext`.
 
+The findings payload rides the IPC event stream, so the gate renders at most 50
+question rows. When more are open, one further notice reports the count and
+names the remaining question ids: the gate releases only once every open
+question is answered, and a question dropped from the rows is not re-emitted
+later, so those ids are answered with `axi answer` exactly like the ones that
+have a row of their own.
+
 The reviewer therefore never idles. It idles only in the sense the captain
 required - after it has reviewed everything it can and emitted every question -
 and in that state no process is alive at all, so there is nothing to time out

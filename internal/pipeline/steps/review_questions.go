@@ -266,10 +266,12 @@ func recordAnsweredQuestions(sctx *pipeline.StepContext, conv reviewqa.Conversat
 // maxPublishedConversationEntries/Chars for the PR body), so these are the
 // outliers rather than a new policy.
 //
-// Same remedy as maxReviewBotCommentFindings in ci_findings.go, and it degrades
-// the same way: dropping a question finding loses nothing, because the question
-// stays open in the conversation, the gate keeps parking, and the dropped
-// question is emitted once the others are answered.
+// Same remedy as maxReviewBotCommentFindings in ci_findings.go, but it degrades
+// differently, because a review question needs an answer before the gate can
+// release: a dropped question is NOT re-emitted as a row once the others are
+// answered (that would need another review turn, and a review turn only starts
+// with no question open), so the omission marker names the dropped ids and they
+// are answered by id like any other.
 const (
 	maxReviewQuestionFindings      = 50
 	maxReviewQuestionDescription   = 2000
@@ -323,9 +325,11 @@ func openReviewQuestionFindings(conv reviewqa.Conversation) []types.Finding {
 	if len(open) == 0 {
 		return nil
 	}
-	omitted := 0
+	var omittedIDs []string
 	if len(open) > maxReviewQuestionFindings {
-		omitted = len(open) - maxReviewQuestionFindings
+		for _, e := range open[maxReviewQuestionFindings:] {
+			omittedIDs = append(omittedIDs, e.ID)
+		}
 		open = open[:maxReviewQuestionFindings]
 	}
 	findings := make([]types.Finding, 0, len(open)+1)
@@ -354,16 +358,27 @@ func openReviewQuestionFindings(conv reviewqa.Conversation) []types.Finding {
 			Category:    types.FindingCategoryReviewQuestion,
 		})
 	}
-	if omitted > 0 {
+	if len(omittedIDs) > 0 {
 		// Carries the review-question CATEGORY, so the gate still parks and no
 		// automatic resolver treats it as work, but not a "question-<id>" ID,
 		// so it is not rendered as an answerable row.
+		//
+		// It LISTS the omitted ids, and that list is the only handle on them:
+		// both release paths require the conversation to have NOTHING open
+		// (RunManager.HandleAnswerReviewQuestion and
+		// ReviewStep.ResumeApprovalGate), and a dropped question is not
+		// re-emitted as a row once the listed ones are settled - re-emitting
+		// needs another review turn, and a review turn only starts when no
+		// question is open. Without the ids here the gate would park forever.
+		// The description is bounded like every other one; if even the id list
+		// is cut, the truncation marker says so and the run's questions.ndjson
+		// still carries every open question.
 		findings = append(findings, types.Finding{
 			ID:       "review-questions-omitted",
 			Severity: types.FindingSeverityWarning,
-			Description: fmt.Sprintf(
-				"%d further review question(s) are open and not listed here. Answer the questions above; the rest are emitted once these are settled.",
-				omitted),
+			Description: boundReviewQuestionText(fmt.Sprintf(
+				"%d further review question(s) are open and have no row of their own. This gate releases only once EVERY open question is answered, so answer these by id as well, with: no-mistakes axi answer --question <id> --answer \"<your answer>\". Omitted question ids: %s",
+				len(omittedIDs), strings.Join(omittedIDs, ", ")), maxReviewQuestionDescription),
 			Action:   types.ActionAskUser,
 			Category: types.FindingCategoryReviewQuestion,
 		})

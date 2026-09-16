@@ -893,6 +893,19 @@ func TestOpenReviewQuestionFindingsAreBounded(t *testing.T) {
 	if !strings.Contains(marker.Description, "7 further review question") {
 		t.Fatalf("marker does not report how many were omitted: %q", marker.Description)
 	}
+	// It must also NAME them. Both release paths require the conversation to
+	// have nothing open, and a dropped question is never re-emitted as a row,
+	// so an id that appears nowhere is a question that can never be answered
+	// and a gate that parks forever.
+	for i := maxReviewQuestionFindings; i < open; i++ {
+		id := fmt.Sprintf("q%d", i)
+		if !strings.Contains(marker.Description, id) {
+			t.Fatalf("marker does not name omitted question %s, so it cannot be answered: %q", id, marker.Description)
+		}
+	}
+	if utf8.RuneCountInString(marker.Description) > maxReviewQuestionDescription+64 || !utf8.ValidString(marker.Description) {
+		t.Fatalf("marker description is unbounded or not valid UTF-8: %q", marker.Description)
+	}
 
 	for _, f := range findings[:maxReviewQuestionFindings] {
 		if n := utf8.RuneCountInString(f.Description); n > maxReviewQuestionDescription+64 {
