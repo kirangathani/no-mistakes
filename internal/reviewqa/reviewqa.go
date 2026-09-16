@@ -12,9 +12,9 @@
 //
 // So this package deliberately writes ANSWERS only (AppendAnswer, for the
 // daemon's answer handler) and never questions: the reviewer is the sole writer
-// of questions.ndjson, and every field its prompt's worked example omits -
-// asked_at always, kind and weight whenever the model trims the example - has
-// to be absent-tolerant on the READ side. A Go writer here would have defaulted
+// of questions.ndjson, and every field its prompt's worked example omits - kind
+// and weight whenever the model trims the example - has to be absent-tolerant
+// on the READ side. A Go writer here would have defaulted
 // those fields and left the tolerant branches unexercised, so tests append the
 // raw lines the agent actually emits instead.
 //
@@ -71,8 +71,14 @@ const (
 	maxLineBytes = 64 << 10
 )
 
-// Question is one line of questions.ndjson. A KindRetract line carries only
-// ID, Kind, Reason and At.
+// Question is one line of questions.ndjson. A KindRetract line carries only ID,
+// Kind and Reason.
+//
+// The timestamps the protocol lets the reviewer write (asked_at on a question,
+// at on a retraction) are deliberately absent here: nothing reads them, and the
+// ordering that matters comes from the append order of the two files, not from
+// a clock the reviewer controls. Unknown fields decode away, so a line that
+// carries them still parses.
 type Question struct {
 	ID       string   `json:"id"`
 	Kind     string   `json:"kind"`
@@ -83,8 +89,6 @@ type Question struct {
 	Line     int      `json:"line,omitempty"`
 	Area     string   `json:"area,omitempty"`
 	Reason   string   `json:"reason,omitempty"`
-	AskedAt  string   `json:"asked_at,omitempty"`
-	At       string   `json:"at,omitempty"`
 }
 
 // Answer is one line of answers.ndjson.

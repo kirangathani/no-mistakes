@@ -187,9 +187,6 @@ func TestAppendAnswerRoundTripsAndValidates(t *testing.T) {
 		t.Fatalf("conversation = %+v", conv)
 	}
 	entry := conv.Answered()[0]
-	if entry.AskedAt != "" {
-		t.Fatalf("asked_at was not on the line, so nothing may invent one: %+v", entry)
-	}
 	if entry.Answer.AnsweredAt == "" {
 		t.Fatalf("answered_at default not applied: %+v", entry.Answer)
 	}
