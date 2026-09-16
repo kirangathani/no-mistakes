@@ -32,8 +32,16 @@ type StepContext struct {
 	// FinalizingAnswers is true when re-executing after a types.ActionAnswer
 	// response: every question the reviewer left open has been answered, and
 	// the step resumes the SAME reviewer session with those answers so it can
-	// finish the pass it parked mid-way. No code changed, so this is not a fix
-	// round and must never set Fixing.
+	// finish the pass it parked mid-way.
+	//
+	// The answer itself changes no code, but this CAN be set together with
+	// Fixing, and both answer paths do set both: a question may be asked by a
+	// rereview inside a fix round, whose gate parks as fix_review, and the
+	// answer round has to keep that context or the step's durable status
+	// changes depending on whether a daemon restart happened. SkipFixExecution
+	// is what keeps the fixer from re-running over already-fixed code, and
+	// review.go's `FinalizingAnswers && !Fixing` exists because the
+	// combination is reachable - not to forbid it.
 	FinalizingAnswers     bool
 	ReviewStartingHeadSHA string
 	PreviousFindings      string // JSON findings selected for the current fix round

@@ -308,10 +308,18 @@ func (e *Executor) initializeRunScopes(runID string) {
 
 type stepExecutionState struct {
 	fixing bool
+	// skipFixExecution replays an already-completed fix round's review turn
+	// only, mirroring what the live loop sets alongside an answer. It exists so
+	// a recovered answer round can inherit its gate's fix-round context without
+	// re-running the fixer over already-fixed code.
+	skipFixExecution bool
 	// answering re-enters a review step whose gate parked on its reviewer's own
-	// open questions, now that every one of them has an answer. It is not a fix
-	// round and must never be set together with fixing: no code changed, and
-	// the same reviewer session is resumed to finish its pass.
+	// open questions, now that every one of them has an answer. No code changed
+	// by the answer itself, but it CAN be set together with fixing: the question
+	// may have been asked by a rereview inside a fix round, in which case the
+	// gate parked as fix_review and the answer round has to keep that context or
+	// the two answer paths disagree about the step's durable status. That is
+	// what skipFixExecution above is for.
 	answering        bool
 	previousFindings string
 	deferredFindings string
@@ -526,6 +534,21 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		if response.action == types.ActionAnswer {
 			state.answering = true
+			// Inherit the parked gate's fix-round context, or the two answer
+			// paths disagree. A question can be asked by a rereview INSIDE a
+			// fix round, which parks as fix_review; the live path leaves
+			// sctx.Fixing set and adds SkipFixExecution, so it re-parks as
+			// fix_review again. Without this the recovered path re-parked as
+			// awaiting_approval for the identical state, and that label is what
+			// the automatic resolvers branch on - they approve a fix_review
+			// gate but send FIX for an awaiting_approval one, so a restart cost
+			// an extra pipeline-authored fix round on a gate that had already
+			// converged. skipFixExecution is not optional here: fixing alone
+			// would re-run the fixer over already-fixed code.
+			if gate.stepResult.Status == types.StepStatusFixReview {
+				state.fixing = true
+				state.skipFixExecution = true
+			}
 			if dbErr := e.db.UpdateStepStatus(gate.stepResult.ID, types.StepStatusRunning); dbErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("return recovered step %s to running: %w", gate.step.Name(), dbErr), ctx)
 			}
@@ -903,6 +926,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Shared:            e.shared,
 		EvidenceDir:       e.runEvidenceDir(run.ID),
 		Fixing:            state.fixing,
+		SkipFixExecution:  state.skipFixExecution,
 		FinalizingAnswers: state.answering,
 		PreviousFindings:  state.previousFindings,
 		DeferredFindings:  state.deferredFindings,
@@ -937,10 +961,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// "answer" when it re-enters the step itself.
 	nextTrigger := "initial"
 	switch {
-	case sctx.Fixing:
-		nextTrigger = "auto_fix"
+	// answering is tested FIRST because the two are not exclusive: an answer
+	// round that inherits a fix_review gate's context carries fixing too, and
+	// labelling it "auto_fix" would persist a human's answer as a pipeline fix
+	// round - which IsFixRound then reads as one.
 	case state.answering:
 		nextTrigger = "answer"
+	case sctx.Fixing:
+		nextTrigger = "auto_fix"
 	}
 	skipRemaining := false
 	stepSkipped := false
