@@ -225,22 +225,27 @@ func recordAnsweredQuestions(sctx *pipeline.StepContext, conv reviewqa.Conversat
 	if sctx.Repo.ID == "" || branch == "" {
 		return
 	}
-	for _, e := range conv.Answered() {
+	// One row per settled ASK, not per id: an agent reuses an id, so a later
+	// ask of "q1" is a different question a human answered separately, and
+	// writing only the latest state would erase the earlier decision from the
+	// do-not-re-raise set and from the PR body.
+	for _, ask := range conv.SettledAsks() {
 		err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
 			RepoID:     sctx.Repo.ID,
 			Branch:     branch,
-			QuestionID: e.ID,
+			QuestionID: ask.Question.ID,
 			RunID:      sctx.Run.ID,
-			Question:   e.Question.Question,
-			Options:    e.Options,
-			File:       e.File,
-			Line:       e.Line,
-			Answer:     e.Answer.Answer,
-			AnsweredBy: e.Answer.AnsweredBy,
-			AnsweredAt: e.Answer.AnsweredAt,
+			AskOrdinal: ask.Ordinal,
+			Question:   ask.Question.Question,
+			Options:    ask.Question.Options,
+			File:       ask.Question.File,
+			Line:       ask.Question.Line,
+			Answer:     ask.Answer.Answer,
+			AnsweredBy: ask.Answer.AnsweredBy,
+			AnsweredAt: ask.Answer.AnsweredAt,
 		})
 		if err != nil {
-			slog.Warn("failed to record a settled review question", "run_id", sctx.Run.ID, "question", e.ID, "error", err)
+			slog.Warn("failed to record a settled review question", "run_id", sctx.Run.ID, "question", ask.Question.ID, "ask", ask.Ordinal, "error", err)
 		}
 	}
 }

@@ -329,3 +329,88 @@ func TestLoadReAskAfterRetractionComesBackOpen(t *testing.T) {
 		t.Fatalf("a revived question must be open, not pre-answered: open=%d answered=%d", len(conv.Open()), len(conv.Answered()))
 	}
 }
+
+// TestSettledAsksKeepEveryDecisionForAReusedID is the load half of the
+// re-used-id defect. Entry collapses an id to its latest state, which is what
+// the gate needs, so it cannot supply the earlier (question, answer) pair - and
+// the durable store has to, or a human's decision disappears.
+func TestSettledAsksKeepEveryDecisionForAReusedID(t *testing.T) {
+	dir := t.TempDir()
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"Is the legacy route deliberate?","options":["yes","no"],"weight":"major"}`)
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "yes", AnsweredBy: "captain"}); err != nil {
+		t.Fatal(err)
+	}
+	// A cold rereview in a fix round is shown only OPEN questions, so it
+	// re-uses q1 for a different question.
+	appendQuestionLine(t, dir, `{"id":"q1","question":"Should the new /v3 route answer too?","options":["yes","no"]}`)
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "no", AnsweredBy: "captain"}); err != nil {
+		t.Fatal(err)
+	}
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := conv.SettledAsks()
+	if len(settled) != 2 {
+		t.Fatalf("settled asks = %d, want both decisions: %#v", len(settled), settled)
+	}
+	if settled[0].Ordinal != 1 || settled[0].Question.Question != "Is the legacy route deliberate?" || settled[0].Answer.Answer != "yes" {
+		t.Fatalf("ask 1 lost its own pairing: %#v / %#v", settled[0].Question, settled[0].Answer)
+	}
+	if settled[1].Ordinal != 2 || settled[1].Question.Question != "Should the new /v3 route answer too?" || settled[1].Answer.Answer != "no" {
+		t.Fatalf("ask 2 is mispaired: %#v / %#v", settled[1].Question, settled[1].Answer)
+	}
+	// Entry still reports only the latest, which the gate depends on.
+	if answered := conv.Answered(); len(answered) != 1 || answered[0].Answer.Answer != "no" {
+		t.Fatalf("Answered() should still collapse to the latest state: %#v", answered)
+	}
+}
+
+// A correction to the SAME ask still replaces rather than accumulating, so the
+// contract the intent states is unchanged.
+func TestSettledAsksTreatASurplusAnswerAsACorrection(t *testing.T) {
+	dir := t.TempDir()
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep it?","options":["keep","drop"],"weight":"major"}`)
+	for _, a := range []string{"keep", "drop, on reflection"} {
+		if err := AppendAnswer(dir, Answer{ID: "q1", Answer: a, AnsweredBy: "captain"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := conv.SettledAsks()
+	if len(settled) != 1 {
+		t.Fatalf("a correction accumulated instead of replacing: %#v", settled)
+	}
+	if settled[0].Answer.Answer != "drop, on reflection" {
+		t.Fatalf("the correction did not win: %#v", settled[0].Answer)
+	}
+}
+
+// An id asked twice with only one answer settles NOTHING: the re-ask is still
+// open and the gate must park again, so the earlier ask is not reported settled
+// off the strength of an answer that belongs to it alone.
+func TestSettledAsksLeaveAReAskShortOfAnAnswerOpen(t *testing.T) {
+	dir := t.TempDir()
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"first","options":["a","b"],"weight":"major"}`)
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"second","options":["a","b"],"weight":"major"}`)
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conv.Open()) != 1 {
+		t.Fatalf("the re-ask must stay open: open=%d", len(conv.Open()))
+	}
+	settled := conv.SettledAsks()
+	if len(settled) != 1 || settled[0].Ordinal != 1 || settled[0].Answer.Answer != "a" {
+		t.Fatalf("ask 1 should be settled by its own answer and ask 2 open: %#v", settled)
+	}
+}

@@ -111,6 +111,22 @@ func (e Entry) Open() bool { return !e.Retracted && e.Answer == nil }
 // Answered reports whether a live question has an answer.
 func (e Entry) Answered() bool { return !e.Retracted && e.Answer != nil }
 
+// Ask is ONE question line and the answer that settled it, paired by ordinal:
+// the Nth time an id was asked is paired with the Nth answer for that id.
+//
+// It exists because Entry deliberately collapses to the LATEST state of an id -
+// which is what the gate needs - while the durable answer store must keep every
+// decision a human gave. An agent reuses an id (a cold rereview in a fix round
+// is shown only the still-open questions, so it starts numbering at q1 again),
+// so without per-ask pairing the second q1's answer overwrote the first's and a
+// human's recorded decision vanished from the do-not-re-raise set.
+type Ask struct {
+	// Ordinal is 1-based: the Nth time this id was asked in this conversation.
+	Ordinal  int
+	Question Question
+	Answer   *Answer
+}
+
 // Conversation is one run's questions in the order they were first asked.
 type Conversation struct {
 	Entries []Entry
@@ -119,6 +135,24 @@ type Conversation struct {
 	// id nobody asked. Never an error - a half-written trailing line is
 	// expected while the reviewer is still appending.
 	Notes []string
+	// Asks is every accepted question LINE in file order, each paired with the
+	// answer that settled it. Entries collapse an id to its latest state; Asks
+	// does not, which is what lets the durable store keep both decisions when
+	// an id is re-asked.
+	Asks []Ask
+}
+
+// SettledAsks returns every (question, answer) pair this conversation has
+// settled, oldest first, including earlier asks of an id that was later
+// re-asked. Entry-based accessors report only the latest state of each id.
+func (c Conversation) SettledAsks() []Ask {
+	out := make([]Ask, 0, len(c.Asks))
+	for _, a := range c.Asks {
+		if a.Answer != nil {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // Open returns the entries that still block the step.
@@ -197,6 +231,10 @@ func Load(dir string) (Conversation, error) {
 	// assuming the previous answer still applies - which is the safe direction
 	// here and also the behaviour under a byte-truncated answers file.
 	asks := make(map[string]int, len(questionLines))
+	// Every accepted question line per id, in file order, so an earlier ask
+	// survives a later one for the durable store's benefit.
+	lines := make(map[string][]Question, len(questionLines))
+	askOrder := make([]string, 0, len(questionLines))
 	answersByID := make(map[string][]Answer, len(answerLines))
 	for _, line := range questionLines {
 		var q Question
@@ -237,6 +275,8 @@ func Load(dir string) (Conversation, error) {
 			continue
 		}
 		asks[q.ID]++
+		lines[q.ID] = append(lines[q.ID], q)
+		askOrder = append(askOrder, q.ID)
 		if entry, ok := byID[q.ID]; ok {
 			// A later question line for the same id is an edit, not a
 			// duplicate. It also revives a retracted question, because
@@ -280,6 +320,32 @@ func Load(dir string) (Conversation, error) {
 		}
 		answer := answers[len(answers)-1]
 		entry.Answer = &answer
+	}
+
+	// Pair the Nth ask of an id with its Nth answer. The LAST ask of an id
+	// also absorbs every surplus answer, because an answer arriving after the
+	// final ask is a CORRECTION to it - the same rule Entry uses, so a
+	// correction still replaces rather than accumulating.
+	seen := make(map[string]int, len(lines))
+	conv.Asks = make([]Ask, 0, len(askOrder))
+	for _, id := range askOrder {
+		seen[id]++
+		ordinal := seen[id]
+		ask := Ask{Ordinal: ordinal, Question: lines[id][ordinal-1]}
+		answers := answersByID[id]
+		switch {
+		case ordinal < asks[id]:
+			// An earlier ask: settled by its own answer if one arrived.
+			if ordinal-1 < len(answers) {
+				answer := answers[ordinal-1]
+				ask.Answer = &answer
+			}
+		case len(answers) >= asks[id]:
+			// The final ask, settled only once every ask has an answer.
+			answer := answers[len(answers)-1]
+			ask.Answer = &answer
+		}
+		conv.Asks = append(conv.Asks, ask)
 	}
 
 	conv.Entries = make([]Entry, 0, len(order))

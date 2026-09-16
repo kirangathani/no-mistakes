@@ -256,9 +256,19 @@ gives the reviewer no licence to soften a finding it did not ask about.
 A mid-turn answer is not a gate response, so it cannot ride the existing
 `step_rounds` decision channel. The review step mirrors each answered question
 into `review_questions` when it finalizes: repository, branch, run, question id,
-question text, options, answer, who answered, and timestamps. Nothing deletes
-those rows, for the same reason nothing deletes a branch decision - an answer a
-human gave about this branch keeps standing.
+ask ordinal, question text, options, answer, who answered, and timestamps.
+Nothing deletes those rows, for the same reason nothing deletes a branch
+decision - an answer a human gave about this branch keeps standing.
+
+The ask ordinal is part of the key, and it is what makes that promise true. A
+question id belongs to the agent and is unique only by accident: a cold rereview
+in a fix round is shown only the still-open questions, so it starts numbering at
+`q1` again for a genuinely different question, and the reader treats that as a
+re-ask rather than a correction. One row per settled ASK therefore keeps both
+decisions; a correction to the same ask still replaces. Keyed by id alone within
+a run, answering the second `q1` would have overwritten the first's row, and the
+earlier decision would have disappeared from the section below and from the PR
+body - silently.
 
 Every later review turn on the same branch, in any run, receives them as a
 **Settled questions (do not re-raise)** prompt section, rendered separately from

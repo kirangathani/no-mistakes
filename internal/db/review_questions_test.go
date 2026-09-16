@@ -245,3 +245,79 @@ func TestGetPreviousRunReviewRoundsReportsNothingToCarryForward(t *testing.T) {
 		t.Fatalf("previous run with no rounds = (%#v, %v), want (nil, nil)", got, err)
 	}
 }
+
+// TestReviewAnswersAreKeyedPerAskWithinOneRun is the store half of the
+// re-used-id defect: within ONE run a re-asked id used to overwrite the earlier
+// row, so the first human decision vanished from the do-not-re-raise set and
+// from the PR body with nothing erroring - and the design doc promises nothing
+// deletes these rows.
+func TestReviewAnswersAreKeyedPerAskWithinOneRun(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/work/repo", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := ReviewAnswer{RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: run.ID}
+
+	first := base
+	first.AskOrdinal = 1
+	first.Question = "Is the legacy route deliberate?"
+	first.Answer = "yes"
+	first.AnsweredBy = "captain"
+	if err := d.RecordReviewAnswer(first); err != nil {
+		t.Fatal(err)
+	}
+	// The fix round's cold rereview re-used the id for a different question.
+	second := base
+	second.AskOrdinal = 2
+	second.Question = "Should the new /v3 route answer too?"
+	second.Answer = "no"
+	second.AnsweredBy = "captain"
+	if err := d.RecordReviewAnswer(second); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := d.GetBranchReviewAnswers(repo.ID, "feature", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want both decisions kept: %+v", len(got), got)
+	}
+	byOrdinal := map[int]ReviewAnswer{}
+	for _, a := range got {
+		byOrdinal[a.AskOrdinal] = a
+	}
+	if a := byOrdinal[1]; a.Question != first.Question || a.Answer != "yes" {
+		t.Fatalf("ask 1 was lost or mispaired: %+v", a)
+	}
+	if a := byOrdinal[2]; a.Question != second.Question || a.Answer != "no" {
+		t.Fatalf("ask 2 was lost or mispaired: %+v", a)
+	}
+
+	// A correction to the SAME ask still replaces, which is the stated contract.
+	correction := second
+	correction.Answer = "yes, behind a flag"
+	if err := d.RecordReviewAnswer(correction); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = d.GetBranchReviewAnswers(repo.ID, "feature", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("a correction to one ask accumulated: %+v", got)
+	}
+	for _, a := range got {
+		if a.AskOrdinal == 2 && a.Answer != "yes, behind a flag" {
+			t.Fatalf("the correction did not replace ask 2: %+v", a)
+		}
+		if a.AskOrdinal == 1 && a.Answer != "yes" {
+			t.Fatalf("correcting ask 2 disturbed ask 1: %+v", a)
+		}
+	}
+}

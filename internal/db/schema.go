@@ -199,6 +199,7 @@ CREATE TABLE IF NOT EXISTS review_questions (
     branch       TEXT NOT NULL,
     question_id  TEXT NOT NULL,
     run_id       TEXT NOT NULL,
+    ask_ordinal  INTEGER NOT NULL,
     question     TEXT NOT NULL,
     options_json TEXT,
     file         TEXT,
@@ -208,7 +209,7 @@ CREATE TABLE IF NOT EXISTS review_questions (
     answered_at  TEXT,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL,
-    PRIMARY KEY (repo_id, branch, question_id, run_id)
+    PRIMARY KEY (repo_id, branch, question_id, run_id, ask_ordinal)
 );
 
 -- Per-branch range of pipeline-authored commits whose re-review did not

@@ -19,6 +19,10 @@ type ReviewAnswer struct {
 	Branch     string
 	QuestionID string
 	RunID      string
+	// AskOrdinal is 1-based: the Nth time this question id was asked in this
+	// run. It is part of the key because an agent reuses an id, and each ask
+	// is a different question a human answered separately.
+	AskOrdinal int
 	Question   string
 	Options    []string
 	File       string
@@ -31,9 +35,10 @@ type ReviewAnswer struct {
 
 // RecordReviewAnswer persists one answered review question for a branch.
 //
-// The write is an upsert keyed by (repo, branch, question, run): within one run
-// a corrected answer replaces the earlier one rather than accumulating, which
-// matches the file protocol where the last answers.ndjson line for an id wins.
+// The write is an upsert keyed by (repo, branch, question, run, ask): a
+// corrected answer to the SAME ask replaces the earlier one rather than
+// accumulating, which matches the file protocol where the last answers.ndjson
+// line for an ask wins.
 //
 // run_id is part of the key because question ids are chosen by the agent and
 // are unique only by accident. Without it, run B's "q1" overwrote run A's
@@ -43,6 +48,15 @@ type ReviewAnswer struct {
 // happened. The answer is still about the branch and still reaches every later
 // cold reviewer; what is per-run is the identity of the question asked, not the
 // scope of its answer.
+//
+// ask_ordinal is in the key for the same reason one level down, WITHIN a run: a
+// cold rereview in a fix round is shown only the still-open questions, so it
+// starts numbering at q1 again for a genuinely different question, and
+// reviewqa.Load correctly treats that as a re-ask rather than a correction. The
+// store has to agree, or answering the second q1 replaced the first's row and a
+// human's decision vanished from the do-not-re-raise set and from the PR body,
+// silently - which also contradicted the design doc's promise that nothing
+// deletes these rows.
 func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 	if a.RepoID == "" || a.Branch == "" || a.QuestionID == "" {
 		return fmt.Errorf("record review answer: repo, branch and question id are required")
@@ -56,13 +70,18 @@ func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 		s := string(encoded)
 		optionsJSON = &s
 	}
+	// A caller that predates per-ask keying, or a single-ask question, is ask 1.
+	askOrdinal := a.AskOrdinal
+	if askOrdinal < 1 {
+		askOrdinal = 1
+	}
 	now := time.Now().Unix()
 	_, err := d.sql.Exec(
 		`INSERT INTO review_questions
-		    (repo_id, branch, question_id, run_id, question, options_json, file, line,
+		    (repo_id, branch, question_id, run_id, ask_ordinal, question, options_json, file, line,
 		     answer, answered_by, answered_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (repo_id, branch, question_id, run_id) DO UPDATE SET
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (repo_id, branch, question_id, run_id, ask_ordinal) DO UPDATE SET
 		    question = excluded.question,
 		    options_json = excluded.options_json,
 		    file = excluded.file,
@@ -71,7 +90,7 @@ func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 		    answered_by = excluded.answered_by,
 		    answered_at = excluded.answered_at,
 		    updated_at = excluded.updated_at`,
-		a.RepoID, a.Branch, a.QuestionID, a.RunID, a.Question, optionsJSON,
+		a.RepoID, a.Branch, a.QuestionID, a.RunID, askOrdinal, a.Question, optionsJSON,
 		nullableText(a.File), nullableInt(a.Line),
 		a.Answer, nullableText(a.AnsweredBy), nullableText(a.AnsweredAt), now, now,
 	)
@@ -89,11 +108,11 @@ func (d *DB) GetBranchReviewAnswers(repoID, branch string, limit int) ([]ReviewA
 		limit = MaxBranchReviewAnswers
 	}
 	rows, err := d.sql.Query(
-		`SELECT repo_id, branch, question_id, run_id, question, options_json, file, line,
+		`SELECT repo_id, branch, question_id, run_id, ask_ordinal, question, options_json, file, line,
 		        answer, answered_by, answered_at, updated_at
 		   FROM review_questions
 		  WHERE repo_id = ? AND branch = ?
-		  ORDER BY updated_at DESC, question_id DESC
+		  ORDER BY updated_at DESC, question_id DESC, ask_ordinal DESC
 		  LIMIT ?`,
 		repoID, branch, limit+1,
 	)
@@ -108,7 +127,7 @@ func (d *DB) GetBranchReviewAnswers(repoID, branch string, limit int) ([]ReviewA
 		var optionsJSON, file, answeredBy, answeredAt *string
 		var line *int64
 		if err := rows.Scan(
-			&a.RepoID, &a.Branch, &a.QuestionID, &a.RunID, &a.Question, &optionsJSON,
+			&a.RepoID, &a.Branch, &a.QuestionID, &a.RunID, &a.AskOrdinal, &a.Question, &optionsJSON,
 			&file, &line, &a.Answer, &answeredBy, &answeredAt, &a.UpdatedAt,
 		); err != nil {
 			return nil, false, fmt.Errorf("scan branch review answer: %w", err)
