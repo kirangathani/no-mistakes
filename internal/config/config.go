@@ -828,13 +828,16 @@ type TestRaw struct {
 	// every installation did before the gate existed.
 	//
 	// "diff-class": the turn runs only when the run's diff touches a product
-	// file per NonProductPaths, or when no earlier run on the same branch
-	// already earned a go verdict at an unchanged product state. The turn is
-	// the pipeline's single most expensive act - a measured ~21 minutes and
-	// ~19M tokens per run, 38% of all pipeline tokens - and a decision-only
-	// re-run of a branch re-buys it in full, so the gate is what a repository
-	// reaches for when that bill outweighs re-deriving evidence it already has.
-	// The configured commands.test is outside the gate and runs either way.
+	// file per NonProductPaths AND this branch's newest recorded verdict is
+	// not a go earned, under the same run intent, at a product state this head
+	// still matches. A failing commands.test baseline also forces the turn.
+	//
+	// The turn is the pipeline's single most expensive act - a measured ~21
+	// minutes and ~19M tokens per run, 38% of all pipeline tokens - and a
+	// decision-only re-run of a branch re-buys it in full, so the gate is what
+	// a repository reaches for when that bill outweighs re-deriving evidence
+	// it already has. The configured commands.test is outside the gate and
+	// runs either way.
 	//
 	// It is an opt-in rather than a default because it changes which runs get
 	// live validation at all: a version bump must not quietly stop validating
