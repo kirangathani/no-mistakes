@@ -40,14 +40,14 @@ const (
 	KindRetract  = "retract"
 )
 
-// Weights a question can carry. Only major questions are ever emitted: the
-// reviewer decides minor ones itself (captain's ruling of 2026-09-15, routing
-// by weight unchanged), so a minor line is a protocol violation and is
-// reported rather than silently escalated.
-const (
-	WeightMajor = "major"
-	WeightMinor = "minor"
-)
+// WeightMinor is the only weight this package reads. Only major questions are
+// ever emitted: the reviewer decides minor ones itself (captain's ruling of
+// 2026-09-15, routing by weight unchanged), so a minor line is a protocol
+// violation and is reported rather than silently escalated. An absent weight is
+// therefore treated as major, which is why there is no constant for it - one
+// existed, was never referenced anywhere in the tree, and Go does not report an
+// unused constant.
+const WeightMinor = "minor"
 
 // File names inside the conversation directory.
 const (
