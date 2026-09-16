@@ -159,12 +159,42 @@ type Conversation struct {
 // SettledAsks returns every (question, answer) pair this conversation has
 // settled, oldest first, including earlier asks of an id that was later
 // re-asked. Entry-based accessors report only the latest state of each id.
+//
+// A RETRACTED ask is never settled, whatever answer landed on it. The reviewer
+// withdraws a question it has answered for itself, and an operator who saw that
+// question before the retraction can still answer it - the window is the whole
+// time the reviewer keeps working. That answer stays recorded on disk, like any
+// orphan or duplicate, but it must not become a durable branch decision: the
+// only consumer of this list writes review_questions, whose rows reach every
+// later reviewer as questions not to re-raise and are never deleted.
+//
+// Only the LAST ask of a retracted id is skipped, because that is the ask the
+// retraction closed. An earlier ask of the same id was a different question,
+// and a human's decision on it would otherwise vanish - an id asked, answered,
+// re-asked and then retracted inside one turn is recorded once, at the end of
+// that turn.
 func (c Conversation) SettledAsks() []Ask {
+	retracted := make(map[string]bool, len(c.Entries))
+	for _, e := range c.Entries {
+		if e.Retracted {
+			retracted[e.ID] = true
+		}
+	}
+	lastAsk := make(map[string]int, len(c.Asks))
+	for _, a := range c.Asks {
+		if a.Ordinal > lastAsk[a.Question.ID] {
+			lastAsk[a.Question.ID] = a.Ordinal
+		}
+	}
 	out := make([]Ask, 0, len(c.Asks))
 	for _, a := range c.Asks {
-		if a.Answer != nil {
-			out = append(out, a)
+		if a.Answer == nil {
+			continue
 		}
+		if retracted[a.Question.ID] && a.Ordinal == lastAsk[a.Question.ID] {
+			continue
+		}
+		out = append(out, a)
 	}
 	return out
 }

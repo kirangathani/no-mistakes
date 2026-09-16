@@ -431,7 +431,7 @@ func assertSupersedeSection(t *testing.T, conversation bool) {
 		t.Fatalf("expected one review turn, got %d", len(reviews))
 	}
 	prompt := reviews[0].Prompt
-	const heading = "Previous run's review rounds on this branch (superseded by a later push):"
+	const heading = "Previous run's review rounds on this branch:"
 	if !conversation {
 		if strings.Contains(prompt, heading) || strings.Contains(prompt, "drops the straggler") {
 			t.Fatalf("the superseded section reached a review prompt with the conversation off:\n%s", prompt)
@@ -955,5 +955,117 @@ func TestReviewQuestionPromptSectionsAreBounded(t *testing.T) {
 	}
 	if !strings.Contains(answers, "5 more answers not listed") {
 		t.Fatalf("the answers list was not bounded:\n%s", answers)
+	}
+}
+
+// TestRetractedQuestionIsNeitherPersistedNorRenderedTwice drives both consumers
+// of a settled ask for the sequence the reviewer's own protocol invites: it
+// emits q1, keeps working, settles q1 itself and withdraws it, and an operator
+// who saw q1 answers it in that window.
+//
+// The answer is stamped with q1's ask ordinal - a retraction adds no ask and
+// removes none - so the withdrawn question used to read as settled: it was
+// written to review_questions, where it reaches every later reviewer on this
+// branch as a decision not to re-raise and nothing deletes it, and the PR body
+// rendered the same question twice, once as an answered pair and once as
+// withdrawn.
+func TestRetractedQuestionIsNeitherPersistedNorRenderedTwice(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := withReviewConversation(newTestContextWithDBRecords(t, newStaticReviewAgent(cleanReviewJSON), dir, baseSHA, headSHA, config.Commands{}))
+	convDir := reviewConversationDir(sctx)
+
+	for _, line := range []string{
+		`{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`,
+		`{"id":"q1","kind":"retract","reason":"the migration note answers it"}`,
+	} {
+		if err := appendAgentQuestionLine(convDir, line); err != nil {
+			t.Fatalf("append question: %v", err)
+		}
+	}
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep it", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
+		t.Fatalf("append answer: %v", err)
+	}
+
+	conv, err := reviewqa.Load(convDir)
+	if err != nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+	if len(conv.Withdrawn()) != 1 {
+		t.Fatalf("the seed did not read back as one withdrawn question: %+v", conv.Entries)
+	}
+
+	recordAnsweredQuestions(sctx, conv)
+
+	answers, _, err := sctx.DB.GetBranchReviewAnswers(sctx.Repo.ID, sctx.Run.Branch, 0)
+	if err != nil {
+		t.Fatalf("read branch answers: %v", err)
+	}
+	if len(answers) != 0 {
+		t.Fatalf("a withdrawn question was persisted as a settled branch decision: %#v", answers)
+	}
+
+	section := buildReviewConversationSection(sctx)
+	if n := strings.Count(section, "keep the legacy route?"); n != 1 {
+		t.Fatalf("the withdrawn question is rendered %d times in the PR body:\n%s", n, section)
+	}
+	if !strings.Contains(section, "**Withdrawn by the reviewer:** the migration note answers it") {
+		t.Fatalf("the one rendering is not the withdrawal:\n%s", section)
+	}
+	if strings.Contains(section, "keep it") {
+		t.Fatalf("the late answer was published as a decision:\n%s", section)
+	}
+}
+
+// TestSupersededSectionDoesNotClaimThePreviousRunParked covers the ordinary
+// second push: run 1 COMPLETED, and the author then pushed more commits. The
+// selector is deliberately unfiltered by status, so those rounds still travel -
+// they are what stops this reviewer re-raising a settled decision - but the
+// prefix must not tell it run 1 parked, that findings were fixed, or to judge
+// whether a claimed fix holds. None of that happened.
+func TestSupersededSectionDoesNotClaimThePreviousRunParked(t *testing.T) {
+	mock := &sessionMockAgent{}
+	mock.respond = func(agent.RunOpts) *agent.Result {
+		return &agent.Result{Output: []byte(cleanReviewJSON)}
+	}
+	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}}, enableReviewConversation)
+
+	previous, err := database.InsertRun(repo.ID, run.Branch, "previous-head", run.BaseSHA)
+	if err != nil {
+		t.Fatalf("insert previous run: %v", err)
+	}
+	sr, err := database.InsertStepResult(previous.ID, types.StepReview)
+	if err != nil {
+		t.Fatalf("insert step result: %v", err)
+	}
+	findings := `{"findings":[{"id":"f-9","severity":"error","description":"drops the straggler","action":"ask-user"}],"summary":"1 issue","risk_level":"high","risk_rationale":"bug","risk_scope":"source-or-external"}`
+	if _, err := database.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 0); err != nil {
+		t.Fatalf("insert round: %v", err)
+	}
+	if err := database.UpdateRunStatus(previous.ID, types.RunCompleted); err != nil {
+		t.Fatalf("complete the previous run: %v", err)
+	}
+
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	reviews := reviewCalls(mock.snapshot())
+	if len(reviews) != 1 {
+		t.Fatalf("expected one review turn, got %d", len(reviews))
+	}
+	prompt := reviews[0].Prompt
+	// The rounds still travel: the selection is unchanged, only the claim is.
+	if !strings.Contains(prompt, "drops the straggler") {
+		t.Fatalf("a completed previous run's rounds were dropped:\n%s", prompt)
+	}
+	for _, claim := range []string{
+		"superseded by a later push",
+		"That run's review parked",
+		"fixed findings in their own worktree and pushed",
+		"judge whether each claimed fix actually holds",
+	} {
+		if strings.Contains(prompt, claim) {
+			t.Fatalf("the prompt asserts %q about a run that completed:\n%s", claim, prompt)
+		}
 	}
 }

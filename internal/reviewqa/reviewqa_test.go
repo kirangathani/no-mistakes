@@ -515,3 +515,70 @@ func TestAnOrphanAnswerNeverSettlesALaterAskOfThatID(t *testing.T) {
 		t.Fatalf("the orphan answer was not kept: err=%v content=%q", err, answers)
 	}
 }
+
+// TestARetractedAskIsNeverSettled covers the answer that lands on a question
+// the reviewer has just withdrawn. The retract line marks the entry retracted
+// but adds no ask and removes none, so the answer is stamped with that ask's
+// ordinal and paired with it - which used to make the withdrawn question a
+// SETTLED one: it was written to review_questions as a standing branch
+// decision nothing deletes, and rendered twice in the PR body, once as an
+// answered pair and once as withdrawn.
+//
+// The answer is still recorded. This is a settling rule, not a refusal.
+func TestARetractedAskIsNeverSettled(t *testing.T) {
+	dir := t.TempDir()
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"retract","reason":"the migration note answers it"}`)
+	// The operator saw q1 before the retraction. The daemon stamps it with the
+	// id's ask count, which the retraction did not change.
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conv.Withdrawn()) != 1 {
+		t.Fatalf("the seed did not read back as one withdrawn question: %+v", conv.Entries)
+	}
+	if settled := conv.SettledAsks(); len(settled) != 0 {
+		t.Fatalf("a withdrawn question was settled by a late answer: %#v", settled)
+	}
+
+	answers, err := os.ReadFile(filepath.Join(dir, AnswersFile))
+	if err != nil || !strings.Contains(string(answers), `"keep"`) {
+		t.Fatalf("the answer was not recorded: err=%v content=%q", err, answers)
+	}
+}
+
+// TestARetractionLeavesAnEarlierSettledAskAlone is the precision half of the
+// rule above. Skipping every ask of a retracted id would drop a decision a
+// human really gave: an id asked, answered, re-asked and then withdrawn inside
+// one turn is recorded once, at the end of that turn, so ask 1's answer would
+// reach no store at all - the same silent loss the ask ordinal joined the
+// durable key to prevent.
+func TestARetractionLeavesAnEarlierSettledAskAlone(t *testing.T) {
+	dir := t.TempDir()
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
+		t.Fatal(err)
+	}
+	appendQuestionLine(t, dir, `{"id":"q1","question":"should /v3 answer too?","options":["yes","no"]}`)
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "no", AnsweredBy: "captain", AskOrdinal: 2}); err != nil {
+		t.Fatal(err)
+	}
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"retract","reason":"the migration note answers it"}`)
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := conv.SettledAsks()
+	if len(settled) != 1 || settled[0].Ordinal != 1 {
+		t.Fatalf("want only ask 1 settled, got %#v", settled)
+	}
+	if settled[0].Question.Question != "keep the legacy route?" || settled[0].Answer.Answer != "keep" {
+		t.Fatalf("ask 1 lost its own pairing: %#v / %#v", settled[0].Question, settled[0].Answer)
+	}
+}

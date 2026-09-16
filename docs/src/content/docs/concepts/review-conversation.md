@@ -132,9 +132,12 @@ time two asks and two answers look identical whether the second answer corrects
 the first ask or answers the re-ask, and that ambiguity is the whole defect.
 
 An answer for an unknown or retracted `id` is recorded and ignored, never an
-error: the writer may be racing a retraction it has not read yet. Recorded and
-ignored is permanent for an unknown `id` - it carries no `ask_ordinal`, so a
-later ask of that `id` is a different question and stays open.
+error: the writer may be racing a retraction it has not read yet. Ignored is
+permanent in both cases. An unknown `id` carries no `ask_ordinal`, so a later
+ask of that `id` is a different question and stays open; a retracted ask is
+never settled by any answer, so a question the reviewer withdrew is never
+persisted as a branch decision. An earlier ask of a re-asked id that was later
+retracted keeps its own settled answer.
 
 ## Routing by weight
 
