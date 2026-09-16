@@ -414,6 +414,11 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		Agent:        e.agent,
 		Sessions:     e.sessions,
 		Shared:       e.shared,
+		// The same value executeStep supplies. A reconciler or resumer that
+		// reads the run's evidence - ReviewStep.ResumeApprovalGate resolves the
+		// conversation directory from it - would otherwise decline on every tick
+		// of a RECOVERED park, which is the daemon-restart window it exists for.
+		EvidenceDir: e.runEvidenceDir(run.ID),
 		Log: func(message string) {
 			slog.Info("recovered approval gate reconciliation", "run_id", run.ID, "step", gate.step.Name(), "message", message)
 		},
