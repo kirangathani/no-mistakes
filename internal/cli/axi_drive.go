@@ -817,7 +817,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			// shape as the protected-path refusal above, and inert when the
 			// review conversation is off, because a review-question finding
 			// cannot exist then.
-			if parsed, err := types.ParseFindingsJSON(gate.FindingsJSON); err == nil && types.HasReviewQuestion(parsed) {
+			if pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON) {
 				fmt.Fprintf(progress, "%s: an open review question needs an explicit answer (no-mistakes axi answer --question <id> --answer \"...\"); --yes leaves this gate awaiting one\n", gate.Name)
 				return run, false, nil
 			}
