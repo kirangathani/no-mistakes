@@ -315,27 +315,35 @@ type Findings struct {
 	// payload written before the gate existed.
 	EvidenceSource string `json:"evidence_source,omitempty"`
 	EvidenceReason string `json:"evidence_reason,omitempty"`
-	RiskLevel      string `json:"risk_level"`
-	RiskRationale  string `json:"risk_rationale"`
-	RiskScope      string `json:"risk_scope,omitempty"`
+	// EvidenceOriginRunID is the run that actually drove the live-evidence
+	// agent for this verdict. It is empty when this run drove it itself, and
+	// on a reuse it names the ORIGINATING run rather than the run the verdict
+	// was read from, so a chain of reuses keeps pointing at the only run that
+	// holds artifacts. Carrying it structurally is what lets a reuse copy that
+	// run's evidence forward instead of parsing a run id back out of prose.
+	EvidenceOriginRunID string `json:"evidence_origin_run_id,omitempty"`
+	RiskLevel           string `json:"risk_level"`
+	RiskRationale       string `json:"risk_rationale"`
+	RiskScope           string `json:"risk_scope,omitempty"`
 }
 
 type findingsWire struct {
-	Items          []Finding      `json:"findings"`
-	Legacy         []Finding      `json:"items"`
-	Summary        string         `json:"summary"`
-	ReviewedPaths  []string       `json:"reviewed_paths"`
-	Tested         []string       `json:"tested"`
-	TestingSummary string         `json:"testing_summary"`
-	Artifacts      []TestArtifact `json:"artifacts"`
-	Scenarios      []TestScenario `json:"scenarios"`
-	Verdict        string         `json:"verdict"`
-	TestedHeadSHA  string         `json:"tested_head_sha"`
-	EvidenceSource string         `json:"evidence_source"`
-	EvidenceReason string         `json:"evidence_reason"`
-	RiskLevel      string         `json:"risk_level"`
-	RiskRationale  string         `json:"risk_rationale"`
-	RiskScope      string         `json:"risk_scope"`
+	Items               []Finding      `json:"findings"`
+	Legacy              []Finding      `json:"items"`
+	Summary             string         `json:"summary"`
+	ReviewedPaths       []string       `json:"reviewed_paths"`
+	Tested              []string       `json:"tested"`
+	TestingSummary      string         `json:"testing_summary"`
+	Artifacts           []TestArtifact `json:"artifacts"`
+	Scenarios           []TestScenario `json:"scenarios"`
+	Verdict             string         `json:"verdict"`
+	TestedHeadSHA       string         `json:"tested_head_sha"`
+	EvidenceSource      string         `json:"evidence_source"`
+	EvidenceReason      string         `json:"evidence_reason"`
+	EvidenceOriginRunID string         `json:"evidence_origin_run_id"`
+	RiskLevel           string         `json:"risk_level"`
+	RiskRationale       string         `json:"risk_rationale"`
+	RiskScope           string         `json:"risk_scope"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -350,20 +358,21 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		items = wire.Legacy
 	}
 	return Findings{
-		Items:          items,
-		Summary:        wire.Summary,
-		ReviewedPaths:  wire.ReviewedPaths,
-		Tested:         wire.Tested,
-		TestingSummary: wire.TestingSummary,
-		Artifacts:      wire.Artifacts,
-		Scenarios:      wire.Scenarios,
-		Verdict:        wire.Verdict,
-		TestedHeadSHA:  wire.TestedHeadSHA,
-		EvidenceSource: wire.EvidenceSource,
-		EvidenceReason: wire.EvidenceReason,
-		RiskLevel:      wire.RiskLevel,
-		RiskRationale:  wire.RiskRationale,
-		RiskScope:      wire.RiskScope,
+		Items:               items,
+		Summary:             wire.Summary,
+		ReviewedPaths:       wire.ReviewedPaths,
+		Tested:              wire.Tested,
+		TestingSummary:      wire.TestingSummary,
+		Artifacts:           wire.Artifacts,
+		Scenarios:           wire.Scenarios,
+		Verdict:             wire.Verdict,
+		TestedHeadSHA:       wire.TestedHeadSHA,
+		EvidenceSource:      wire.EvidenceSource,
+		EvidenceReason:      wire.EvidenceReason,
+		EvidenceOriginRunID: wire.EvidenceOriginRunID,
+		RiskLevel:           wire.RiskLevel,
+		RiskRationale:       wire.RiskRationale,
+		RiskScope:           wire.RiskScope,
 	}, nil
 }
 
