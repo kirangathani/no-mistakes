@@ -1790,31 +1790,38 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	// a review gate that had parked on ordinary ask-user CODE findings: the
 	// step re-executed as a finalize turn, burned a review round, and the
 	// operator's pending verdict never happened - their next axi respond then
-	// failed with "no step awaiting approval". A read failure here is not
-	// fatal: the answer has not been written yet, and an unknown prior state
-	// simply means this answer cannot prove it closed a question.
+	// failed with "no step awaiting approval".
 	//
 	// The same snapshot supplies the ask this answer settles. reviewqa cannot
 	// recover that at load time - the two files are appended independently, so
 	// two asks and two answers read the same whether the second answer is a
 	// correction to the first ask or the answer to a re-ask - and binding it
 	// here, at the only writer of answers.ndjson, is what stops a correction
-	// pre-answering the next re-ask of that id. An unreadable conversation
-	// leaves it unstamped, which is the positional pairing reviewqa already
-	// applies to a file written before the field existed.
+	// pre-answering the next re-ask of that id.
+	//
+	// So a conversation this cannot READ is refused rather than written
+	// through: an unstamped answer pairs positionally, which is exactly the
+	// correction-pre-answers-a-re-ask defect the stamp exists to close. The
+	// refusal names the read failure, because an operator told "no open
+	// question" about a conversation nobody could read would go looking for
+	// the wrong thing entirely. A conversation that reads fine with nothing
+	// open is unaffected: that answer is still recorded, still stamped, and
+	// still releases no gate.
+	before, err := reviewqa.Load(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read run %s's review conversation before recording the answer: %w", runID, err)
+	}
 	wasOpen := false
 	askOrdinal := 0
-	if before, err := reviewqa.Load(dir); err == nil {
-		for _, e := range before.Open() {
-			if e.ID == questionID {
-				wasOpen = true
-				break
-			}
+	for _, e := range before.Open() {
+		if e.ID == questionID {
+			wasOpen = true
+			break
 		}
-		for _, ask := range before.Asks {
-			if ask.Question.ID == questionID {
-				askOrdinal = ask.Ordinal
-			}
+	}
+	for _, ask := range before.Asks {
+		if ask.Question.ID == questionID {
+			askOrdinal = ask.Ordinal
 		}
 	}
 

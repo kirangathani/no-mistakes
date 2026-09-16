@@ -117,9 +117,16 @@ and a per-adapter support matrix for a capability the agent already has.
 {"id":"q1","answer":"Keep behind a flag","answered_by":"captain","answered_at":"2026-09-15T13:31:40Z","ask_ordinal":1}
 ```
 
-Written by `no-mistakes axi answer`, or by any operator process appending the
-same line. `ask_ordinal` is which ask of that `id` the answer settles, 1-based,
-stamped by the writer with the `id`'s ask count at the moment of the append. The
+Written by the daemon, and only by the daemon: `no-mistakes axi answer` reaches
+it through `RunManager.HandleAnswerReviewQuestion`, which is the sole writer of
+this file. It has to be, because only it can stamp `ask_ordinal`, and an
+unstamped line pairs positionally - the very ambiguity the stamp closes. An
+answer whose conversation cannot be read is refused rather than written
+unstamped, and the positional pairing survives in `reviewqa.Load` only for files
+written before the field existed.
+
+`ask_ordinal` is which ask of that `id` the answer settles, 1-based, stamped by
+the daemon with the `id`'s ask count at the moment of the append. The
 last line for the same `id` and `ask_ordinal` wins, so a correction is another
 append - and it corrects the ask it was written for, so it never pre-answers a
 later re-ask of that `id`. That binding has to come from the writer: at read
