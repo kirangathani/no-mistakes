@@ -139,10 +139,15 @@ func publishedRunConversation(sctx *pipeline.StepContext) reviewqa.Conversation 
 // publishedConversationText flattens and bounds one quoted line so a long
 // question or answer cannot dominate the body, and so a newline cannot break
 // out of the list item it belongs to.
+// It counts RUNES, not bytes, and so does its disclosure: a question or answer
+// is ordinary prose, so a byte cut falls inside a multi-byte rune on nothing
+// more exotic than a typographic quote or an em dash and publishes invalid
+// UTF-8. This is the same shape as internal/cli's truncate.
 func publishedConversationText(s string) string {
 	s = sanitizePromptText(s)
-	if len(s) <= maxPublishedConversationChars {
+	runes := []rune(s)
+	if len(runes) <= maxPublishedConversationChars {
 		return s
 	}
-	return s[:maxPublishedConversationChars] + fmt.Sprintf("… (truncated, %d chars total)", len(s))
+	return string(runes[:maxPublishedConversationChars]) + fmt.Sprintf("… (truncated, %d chars total)", len(runes))
 }

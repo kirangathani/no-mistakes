@@ -2,10 +2,12 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -508,6 +510,33 @@ func TestPublishedConversationTextFlattensAndBounds(t *testing.T) {
 	got := publishedConversationText(long)
 	if len(got) <= maxPublishedConversationChars || !strings.Contains(got, "truncated") {
 		t.Fatalf("overlong text was not bounded with disclosure: %q", got)
+	}
+}
+
+// TestPublishedConversationTextBoundsRunesNotBytes puts a multi-byte rune
+// astride the bound, which is what ordinary prose does - a typographic quote,
+// an en dash, an ellipsis. A byte slice cuts that rune in half and publishes
+// invalid UTF-8 into the PR body, and reports a byte count as "chars".
+func TestPublishedConversationTextBoundsRunesNotBytes(t *testing.T) {
+	// One dash short of the bound, so the em dash itself straddles it.
+	const runeCount = maxPublishedConversationChars + 50
+	text := strings.Repeat("a", maxPublishedConversationChars-1) + strings.Repeat("—", runeCount-(maxPublishedConversationChars-1))
+
+	got := publishedConversationText(text)
+
+	if !utf8.ValidString(got) {
+		t.Fatalf("published text is not valid UTF-8: %q", got)
+	}
+	body, disclosure, ok := strings.Cut(got, "… (truncated,")
+	if !ok {
+		t.Fatalf("overlong text was not bounded with disclosure: %q", got)
+	}
+	if n := utf8.RuneCountInString(body); n != maxPublishedConversationChars {
+		t.Fatalf("kept %d runes, want %d: %q", n, maxPublishedConversationChars, body)
+	}
+	// The disclosure must report the rune count too, not the byte length.
+	if want := fmt.Sprintf(" %d chars total)", runeCount); disclosure != want {
+		t.Fatalf("disclosure %q, want %q (bytes were %d)", disclosure, want, len(text))
 	}
 }
 
