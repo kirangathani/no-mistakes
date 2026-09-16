@@ -64,7 +64,7 @@ func TestOpenAnsweredAndWithdrawnPartitionTheConversation(t *testing.T) {
 		`{"id":"q3","kind":"retract","reason":"answered by the migration note"}`,
 	)
 	write(t, dir, AnswersFile,
-		`{"id":"q2","answer":"off","answered_by":"captain"}`,
+		`{"id":"q2","answer":"off","answered_by":"captain","ask_ordinal":1}`,
 	)
 
 	conv, err := Load(dir)
@@ -101,9 +101,11 @@ func TestLaterLinesSupersedeEarlierOnesForTheSameID(t *testing.T) {
 		`{"id":"q2","kind":"retract","reason":"thought it was settled"}`,
 		`{"id":"q2","question":"withdrawn then re-asked","options":["a"]}`,
 	)
+	// Both stamped for q1's SECOND ask: the daemon stamps with the id's ask
+	// count at the moment of the append, and the edit was already on disk.
 	write(t, dir, AnswersFile,
-		`{"id":"q1","answer":"a"}`,
-		`{"id":"q1","answer":"b, on reflection"}`,
+		`{"id":"q1","answer":"a","ask_ordinal":2}`,
+		`{"id":"q1","answer":"b, on reflection","ask_ordinal":2}`,
 	)
 
 	conv, err := Load(dir)
@@ -138,9 +140,9 @@ func TestMalformedMinorAndOrphanLinesAreNotedNotFatal(t *testing.T) {
 		`{"id":"q6","kind":"retract"}`,
 	)
 	write(t, dir, AnswersFile,
-		`{"id":"q1","answer":"a"}`,
+		`{"id":"q1","answer":"a","ask_ordinal":1}`,
 		`{"id":"nope","answer":"whatever"}`,
-		`{"id":"q1","answer":""}`,
+		`{"id":"q1","answer":"","ask_ordinal":1}`,
 		`garbage`,
 	)
 
@@ -176,7 +178,7 @@ func TestAppendAnswerRoundTripsAndValidates(t *testing.T) {
 	// The line the reviewer's prompt actually produces: no asked_at, which
 	// nothing in that prompt mentions.
 	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep /v1?","options":["keep","drop"],"weight":"major"}`)
-	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "drop", AnsweredBy: "captain"}); err != nil {
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "drop", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatalf("AppendAnswer: %v", err)
 	}
 	conv, err := Load(dir)
@@ -254,7 +256,7 @@ func TestLoadSupersedingQuestionReopensAnAnsweredEntry(t *testing.T) {
 
 	// The prompt's worked example, minus asked_at, which it never mentions.
 	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy /v1 route?","options":["keep","remove"],"weight":"major"}`)
-	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain"}); err != nil {
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatal(err)
 	}
 	conv, err := Load(dir)
@@ -289,7 +291,7 @@ func TestLoadSupersedingQuestionReopensAnAnsweredEntry(t *testing.T) {
 	}
 
 	// Answering it again settles the NEW question, with the new text.
-	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "no", AnsweredBy: "captain"}); err != nil {
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "no", AnsweredBy: "captain", AskOrdinal: 2}); err != nil {
 		t.Fatal(err)
 	}
 	conv, err = Load(dir)
@@ -311,7 +313,7 @@ func TestLoadReAskAfterRetractionComesBackOpen(t *testing.T) {
 	// The retraction exactly as the prompt spells it: no `at`, which the
 	// deleted Go writer used to supply.
 	appendQuestionLine(t, dir, `{"id":"q1","kind":"retract","reason":"the migration note answers it"}`)
-	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "keep"}); err != nil {
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "keep", AskOrdinal: 1}); err != nil {
 		t.Fatal(err)
 	}
 	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy route after all?","options":["keep","remove"],"weight":"major"}`)
@@ -334,13 +336,13 @@ func TestLoadReAskAfterRetractionComesBackOpen(t *testing.T) {
 func TestSettledAsksKeepEveryDecisionForAReusedID(t *testing.T) {
 	dir := t.TempDir()
 	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"Is the legacy route deliberate?","options":["yes","no"],"weight":"major"}`)
-	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "yes", AnsweredBy: "captain"}); err != nil {
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "yes", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatal(err)
 	}
 	// A cold rereview in a fix round is shown only OPEN questions, so it
 	// re-uses q1 for a different question.
 	appendQuestionLine(t, dir, `{"id":"q1","question":"Should the new /v3 route answer too?","options":["yes","no"]}`)
-	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "no", AnsweredBy: "captain"}); err != nil {
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "no", AnsweredBy: "captain", AskOrdinal: 2}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -369,8 +371,10 @@ func TestSettledAsksKeepEveryDecisionForAReusedID(t *testing.T) {
 func TestSettledAsksTreatASurplusAnswerAsACorrection(t *testing.T) {
 	dir := t.TempDir()
 	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep it?","options":["keep","drop"],"weight":"major"}`)
+	// Both stamped for ask 1, as the daemon stamps them: the second is the
+	// operator correcting the first.
 	for _, a := range []string{"keep", "drop, on reflection"} {
-		if err := AppendAnswer(dir, Answer{ID: "q1", Answer: a, AnsweredBy: "captain"}); err != nil {
+		if err := AppendAnswer(dir, Answer{ID: "q1", Answer: a, AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -394,7 +398,7 @@ func TestSettledAsksTreatASurplusAnswerAsACorrection(t *testing.T) {
 func TestSettledAsksLeaveAReAskShortOfAnAnswerOpen(t *testing.T) {
 	dir := t.TempDir()
 	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"first","options":["a","b"],"weight":"major"}`)
-	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "a"}); err != nil {
+	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "a", AskOrdinal: 1}); err != nil {
 		t.Fatal(err)
 	}
 	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"second","options":["a","b"],"weight":"major"}`)
@@ -456,5 +460,58 @@ func TestASurplusAnswerBindsToItsOwnAskAndLeavesTheReAskOpen(t *testing.T) {
 	}
 	if settled[0].Question.Question != "Is the legacy route deliberate?" || settled[0].Answer.Answer != "no, on reflection" {
 		t.Fatalf("ask 1 lost its correction or took the wrong question: %#v / %#v", settled[0].Question, settled[0].Answer)
+	}
+}
+
+// TestAnOrphanAnswerNeverSettlesALaterAskOfThatID is the regression for the
+// last path that pre-answered a genuinely different question. An answer for an
+// id nobody has asked is written UNSTAMPED - there is no ask to stamp - and the
+// positional fallback then handed it to the first LATER ask of that id: the
+// gate never parked and the reviewer's question reached nobody.
+//
+// Ids are the agent's own tiny space, so a mistyped `axi answer --question q7`
+// names an id the reviewer is likely to use later, and the orphan is recorded
+// with no error by design.
+func TestAnOrphanAnswerNeverSettlesALaterAskOfThatID(t *testing.T) {
+	dir := t.TempDir()
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
+	// Answering an id nobody has asked: the daemon finds no ask for it, so the
+	// line carries no ask_ordinal.
+	if err := AppendAnswer(dir, Answer{ID: "q7", Answer: "remove it", AnsweredBy: "captain"}); err != nil {
+		t.Fatal(err)
+	}
+	if seeded, err := Load(dir); err != nil {
+		t.Fatal(err)
+	} else if len(seeded.Open()) != 1 || seeded.Open()[0].ID != "q1" {
+		t.Fatalf("the seed did not read back as one open question: %+v", seeded)
+	}
+
+	appendQuestionLine(t, dir, `{"id":"q7","question":"should /v3 answer too?","options":["yes","no"]}`)
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var q7 *Entry
+	for i := range conv.Entries {
+		if conv.Entries[i].ID == "q7" {
+			q7 = &conv.Entries[i]
+		}
+	}
+	if q7 == nil {
+		t.Fatalf("q7 was not read back at all: %+v", conv.Entries)
+	}
+	if !q7.Open() {
+		t.Fatalf("the orphan answer pre-settled a question it was never about: %#v", q7)
+	}
+	if len(conv.SettledAsks()) != 0 {
+		t.Fatalf("an orphan answer settled an ask: %#v", conv.SettledAsks())
+	}
+
+	// The orphan is still on disk: recorded and inert is the contract, not
+	// refused.
+	answers, err := os.ReadFile(filepath.Join(dir, AnswersFile))
+	if err != nil || !strings.Contains(string(answers), "remove it") {
+		t.Fatalf("the orphan answer was not kept: err=%v content=%q", err, answers)
 	}
 }

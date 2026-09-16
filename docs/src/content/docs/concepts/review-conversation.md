@@ -91,10 +91,9 @@ and a per-adapter support matrix for a capability the agent already has.
   genuinely different question. So each **ask** is settled only by an answer of
   its own: an answer carries the `ask_ordinal` it settles (see below), and a
   re-ask re-opens the entry and parks the gate again rather than inheriting an
-  answer written before it. An answer with no `ask_ordinal` - a file written
-  before that field, or an answer for an `id` nobody asked - pairs positionally
-  instead, settling a question once it has as many answers as it has been
-  asked. Neither rule compares timestamps, because the two files are appended
+  answer written before it. An answer with no `ask_ordinal` - which only an
+  answer for an `id` nobody asked can be - settles nothing, ever. That rule
+  compares no timestamps, because the two files are appended
   independently and `asked_at`/`answered_at` are optional. The same reason makes
   the per-branch answer store keyed by run as well as by question id, so two
   runs that both use `q1` keep their own settled decisions instead of one
@@ -120,10 +119,9 @@ and a per-adapter support matrix for a capability the agent already has.
 Written by the daemon, and only by the daemon: `no-mistakes axi answer` reaches
 it through `RunManager.HandleAnswerReviewQuestion`, which is the sole writer of
 this file. It has to be, because only it can stamp `ask_ordinal`, and an
-unstamped line pairs positionally - the very ambiguity the stamp closes. An
-answer whose conversation cannot be read is refused rather than written
-unstamped, and the positional pairing survives in `reviewqa.Load` only for files
-written before the field existed.
+unstamped line settles nothing at all. An answer whose conversation cannot be
+read is refused rather than written unstamped, so no question is left parked
+with its operator told they had answered it.
 
 `ask_ordinal` is which ask of that `id` the answer settles, 1-based, stamped by
 the daemon with the `id`'s ask count at the moment of the append. The
@@ -134,7 +132,9 @@ time two asks and two answers look identical whether the second answer corrects
 the first ask or answers the re-ask, and that ambiguity is the whole defect.
 
 An answer for an unknown or retracted `id` is recorded and ignored, never an
-error: the writer may be racing a retraction it has not read yet.
+error: the writer may be racing a retraction it has not read yet. Recorded and
+ignored is permanent for an unknown `id` - it carries no `ask_ordinal`, so a
+later ask of that `id` is a different question and stays open.
 
 ## Routing by weight
 

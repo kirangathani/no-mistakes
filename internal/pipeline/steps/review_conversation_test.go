@@ -201,7 +201,7 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 
 	waitForReviewStatus(t, database, run.ID, types.StepStatusAwaitingApproval)
-	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain"}); err != nil {
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append answer: %v", err)
 	}
 	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
@@ -314,7 +314,7 @@ func TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout(t *testin
 
 	// A 90-minute park - three times the whole review budget.
 	clock = clock.Add(90 * time.Minute)
-	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep"}); err != nil {
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append answer: %v", err)
 	}
 	sctx.FinalizingAnswers = true
@@ -353,7 +353,7 @@ func TestReviewStep_SettledQuestionReachesTheNextColdReviewer(t *testing.T) {
 		t.Fatalf("insert earlier run: %v", err)
 	}
 	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
-		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: earlier.ID,
+		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: earlier.ID, AskOrdinal: 1,
 		Question: "Should seed bytes be computed in the browser?",
 		Answer:   "Yes, keep it in the browser", AnsweredBy: "captain",
 	}); err != nil {
@@ -462,13 +462,13 @@ func TestBuildReviewConversationSection(t *testing.T) {
 	}
 
 	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
-		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: sctx.Run.ID,
+		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: sctx.Run.ID, AskOrdinal: 1,
 		Question: "Should the legacy route keep answering?", Answer: "Keep it behind a flag", AnsweredBy: "captain",
 	}); err != nil {
 		t.Fatalf("record answer: %v", err)
 	}
 	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
-		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q2", RunID: sctx.Run.ID,
+		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q2", RunID: sctx.Run.ID, AskOrdinal: 1,
 		Question: "Is the widened scope intended?", Answer: "No, narrow it",
 	}); err != nil {
 		t.Fatalf("record answer: %v", err)
@@ -629,7 +629,7 @@ func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T)
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 
 	waitForReviewStatus(t, database, run.ID, types.StepStatusFixReview)
-	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "yes"}); err != nil {
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "yes", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append answer: %v", err)
 	}
 	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
@@ -828,6 +828,7 @@ func TestReviewStep_ConversationOffIgnoresQuestionsAlreadyOnDisk(t *testing.T) {
 		Branch:     sctx.Run.Branch,
 		QuestionID: "q0",
 		RunID:      sctx.Run.ID,
+		AskOrdinal: 1,
 		Question:   "was the old route intentional?",
 		Answer:     "yes",
 		AnsweredBy: "captain",

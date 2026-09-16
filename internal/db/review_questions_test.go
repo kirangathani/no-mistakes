@@ -27,7 +27,7 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 	}
 
 	if err := d.RecordReviewAnswer(ReviewAnswer{
-		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: first.ID,
+		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: first.ID, AskOrdinal: 1,
 		Question: "keep /v1?", Options: []string{"keep", "drop"},
 		File: "internal/api/router.go", Line: 88,
 		Answer: "keep behind a flag", AnsweredBy: "captain", AnsweredAt: "2026-09-15T13:31:40Z",
@@ -60,7 +60,7 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 	// matching the file protocol where the last answers.ndjson line for an id
 	// wins.
 	if err := d.RecordReviewAnswer(ReviewAnswer{
-		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: first.ID,
+		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: first.ID, AskOrdinal: 1,
 		Question: "keep /v1?", Answer: "keep it unconditionally", AnsweredBy: "captain",
 	}); err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 	// new question text with the old answer - a record of an exchange that
 	// never happened.
 	if err := d.RecordReviewAnswer(ReviewAnswer{
-		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: second.ID,
+		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: second.ID, AskOrdinal: 1,
 		Question: "should /v2 answer too?", Answer: "no", AnsweredBy: "firstmate",
 	}); err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 
 	// Another branch's conversation is not visible.
 	if err := d.RecordReviewAnswer(ReviewAnswer{
-		RepoID: repo.ID, Branch: "other", QuestionID: "q1", RunID: second.ID,
+		RepoID: repo.ID, Branch: "other", QuestionID: "q1", RunID: second.ID, AskOrdinal: 1,
 		Question: "unrelated", Answer: "yes",
 	}); err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestGetBranchReviewAnswersBoundsAndReportsTruncation(t *testing.T) {
 	}
 	for _, id := range []string{"q1", "q2", "q3"} {
 		if err := d.RecordReviewAnswer(ReviewAnswer{
-			RepoID: repo.ID, Branch: "feature", QuestionID: id, RunID: run.ID,
+			RepoID: repo.ID, Branch: "feature", QuestionID: id, RunID: run.ID, AskOrdinal: 1,
 			Question: "q " + id, Answer: "a " + id,
 		}); err != nil {
 			t.Fatal(err)
@@ -147,14 +147,49 @@ func TestGetBranchReviewAnswersBoundsAndReportsTruncation(t *testing.T) {
 
 func TestRecordReviewAnswerRequiresItsKey(t *testing.T) {
 	d := openTestDB(t)
-	if err := d.RecordReviewAnswer(ReviewAnswer{Branch: "feature", QuestionID: "q1", Answer: "a"}); err == nil {
+	if err := d.RecordReviewAnswer(ReviewAnswer{Branch: "feature", QuestionID: "q1", AskOrdinal: 1, Answer: "a"}); err == nil {
 		t.Fatal("want error with no repo id")
 	}
-	if err := d.RecordReviewAnswer(ReviewAnswer{RepoID: "r", QuestionID: "q1", Answer: "a"}); err == nil {
+	if err := d.RecordReviewAnswer(ReviewAnswer{RepoID: "r", QuestionID: "q1", AskOrdinal: 1, Answer: "a"}); err == nil {
 		t.Fatal("want error with no branch")
 	}
-	if err := d.RecordReviewAnswer(ReviewAnswer{RepoID: "r", Branch: "feature", Answer: "a"}); err == nil {
+	if err := d.RecordReviewAnswer(ReviewAnswer{RepoID: "r", Branch: "feature", AskOrdinal: 1, Answer: "a"}); err == nil {
 		t.Fatal("want error with no question id")
+	}
+	// The ask ordinal is part of the key too, and a caller with none to give is
+	// refused rather than coerced: coercing it to 1 would let the upsert
+	// overwrite the FIRST ask's recorded human decision, which is the failure
+	// the ordinal joined the key to prevent. A real repo and run, because the
+	// checks above return before any SQL runs and a fake repo id would fail
+	// the insert on its own.
+	repo, err := d.InsertRepo("/work/repo", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := ReviewAnswer{
+		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: run.ID, AskOrdinal: 1,
+		Question: "Is the legacy route deliberate?", Answer: "yes", AnsweredBy: "captain",
+	}
+	if err := d.RecordReviewAnswer(settled); err != nil {
+		t.Fatal(err)
+	}
+	unordinalled := settled
+	unordinalled.AskOrdinal = 0
+	unordinalled.Question = "Should /v3 answer too?"
+	unordinalled.Answer = "no"
+	if err := d.RecordReviewAnswer(unordinalled); err == nil {
+		t.Fatal("want error with no ask ordinal")
+	}
+	answers, _, err := d.GetBranchReviewAnswers(repo.ID, "feature", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(answers) != 1 || answers[0].Question != settled.Question || answers[0].Answer != "yes" {
+		t.Fatalf("the refused answer overwrote ask 1's recorded decision: %#v", answers)
 	}
 }
 

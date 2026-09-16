@@ -99,9 +99,8 @@ type Question struct {
 // re-ask of the same id: the two files are appended independently, so at load
 // time two asks and two answers are otherwise indistinguishable between those
 // two sequences, and reading them as the second let a genuinely different
-// question arrive pre-answered. Absent (0) in a file written before this field
-// existed, and in an answer for an id nobody asked; such an answer keeps the
-// positional pairing below.
+// question arrive pre-answered. It is absent (0) only in an answer for an id
+// nobody has asked, which settles nothing, ever.
 type Answer struct {
 	ID         string `json:"id"`
 	Answer     string `json:"answer"`
@@ -237,17 +236,15 @@ func Load(dir string) (Conversation, error) {
 	// Open() was empty, no finding was emitted, the gate never parked, and a
 	// major question reached nobody.
 	//
-	// So an ask is settled only by an answer of its own. An answer carrying an
-	// AskOrdinal binds to THAT ask and nothing else; one without keeps the
-	// positional rule older files rely on, where a question is settled once it
-	// has AS MANY answers as it has been asked. Neither rule compares
-	// timestamps: the two files are appended independently, asked_at and
-	// answered_at are optional and written by whoever appends the line, and
-	// second-granularity RFC3339 from two writers cannot order a fast
-	// exchange. Both fail toward OPEN - a re-ask asks again rather than
-	// inheriting an answer written before it, including a correction to the
-	// ask it supersedes - which is the safe direction here and also the
-	// behaviour under a byte-truncated answers file.
+	// So an ask is settled only by an answer stamped with ITS AskOrdinal, and
+	// nothing else settles it. That is not a comparison of timestamps: the two
+	// files are appended independently, asked_at and answered_at are optional
+	// and written by whoever appends the line, and second-granularity RFC3339
+	// from two writers cannot order a fast exchange. It fails toward OPEN - a
+	// re-ask asks again rather than inheriting an answer written before it,
+	// including a correction to the ask it supersedes - which is the safe
+	// direction here and also the behaviour under a byte-truncated answers
+	// file.
 	asks := make(map[string]int, len(questionLines))
 	// Every accepted question line per id, in file order, so an earlier ask
 	// survives a later one for the durable store's benefit.
@@ -337,7 +334,7 @@ func Load(dir string) (Conversation, error) {
 		seen[id]++
 		ordinal := seen[id]
 		ask := Ask{Ordinal: ordinal, Question: lines[id][ordinal-1]}
-		ask.Answer = settlingAnswer(answersByID[id], ordinal, asks[id])
+		ask.Answer = settlingAnswer(answersByID[id], ordinal)
 		conv.Asks = append(conv.Asks, ask)
 		if ordinal == asks[id] {
 			byID[id].Answer = ask.Answer
@@ -354,38 +351,26 @@ func Load(dir string) (Conversation, error) {
 	return conv, nil
 }
 
-// settlingAnswer returns the answer that settles the ordinal-th of total asks
-// of one id, or nil while that ask is still open.
+// settlingAnswer returns the answer stamped for this ask of one id - the latest
+// of them, so a correction to the same ask replaces - or nil while that ask is
+// still open.
 //
-// An answer stamped with this ordinal wins, the latest such answer replacing an
-// earlier one so a correction to the same ask still replaces. Only when no
-// answer names this ask do the unstamped ones pair positionally, which is what
-// a file written before ask_ordinal existed carries.
-func settlingAnswer(answers []Answer, ordinal, total int) *Answer {
-	var bound *Answer
-	var unbound []Answer
+// An UNSTAMPED answer settles nothing. It used to pair positionally, for "a
+// file written before ask_ordinal existed", but no such file can exist:
+// answers.ndjson arrives with the field and the daemon is its only writer. The
+// one thing that branch really reached was the orphan - an answer for an id
+// nobody has asked yet, which is written unstamped because there is no ask to
+// stamp - and there it settled the first LATER ask of that id, pre-answering a
+// genuinely different question, which is the defect the stamp exists to close.
+// An orphan stays recorded and inert instead.
+func settlingAnswer(answers []Answer, ordinal int) *Answer {
+	var settling *Answer
 	for _, a := range answers {
-		switch {
-		case a.AskOrdinal == ordinal:
-			bound = &a
-		case a.AskOrdinal > 0:
-			// Stamped for a different ask, so it settles nothing here.
-		default:
-			unbound = append(unbound, a)
+		if a.AskOrdinal == ordinal {
+			settling = &a
 		}
 	}
-	if bound != nil {
-		return bound
-	}
-	switch {
-	case ordinal < total:
-		if ordinal-1 < len(unbound) {
-			return &unbound[ordinal-1]
-		}
-	case len(unbound) >= total:
-		return &unbound[len(unbound)-1]
-	}
-	return nil
+	return settling
 }
 
 // AppendAnswer appends one answer, creating the directory on first use.

@@ -1800,9 +1800,9 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	// pre-answering the next re-ask of that id.
 	//
 	// So a conversation this cannot READ is refused rather than written
-	// through: an unstamped answer pairs positionally, which is exactly the
-	// correction-pre-answers-a-re-ask defect the stamp exists to close. The
-	// refusal names the read failure, because an operator told "no open
+	// through: an unstamped answer settles nothing, so the questions it was
+	// meant for would park forever with the operator told they had answered
+	// them. The refusal names the read failure, because an operator told "no open
 	// question" about a conversation nobody could read would go looking for
 	// the wrong thing entirely. A conversation that reads fine with nothing
 	// open is unaffected: that answer is still recorded, still stamped, and

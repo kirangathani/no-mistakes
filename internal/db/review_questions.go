@@ -61,6 +61,14 @@ func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 	if a.RepoID == "" || a.Branch == "" || a.QuestionID == "" {
 		return fmt.Errorf("record review answer: repo, branch and question id are required")
 	}
+	// The ask ordinal is part of the key, so a caller with no ordinal to give
+	// is refused rather than coerced to 1: coercing it would key the row as the
+	// FIRST ask and let the ON CONFLICT clause overwrite that ask's recorded
+	// human decision, which is the failure the ordinal joined the key to
+	// prevent. Every accepted ask is 1-based (reviewqa.Conversation.Asks).
+	if a.AskOrdinal < 1 {
+		return fmt.Errorf("record review answer: ask ordinal must be 1 or greater, got %d", a.AskOrdinal)
+	}
 	var optionsJSON *string
 	if len(a.Options) > 0 {
 		encoded, err := json.Marshal(a.Options)
@@ -69,11 +77,6 @@ func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 		}
 		s := string(encoded)
 		optionsJSON = &s
-	}
-	// A caller that predates per-ask keying, or a single-ask question, is ask 1.
-	askOrdinal := a.AskOrdinal
-	if askOrdinal < 1 {
-		askOrdinal = 1
 	}
 	now := time.Now().Unix()
 	_, err := d.sql.Exec(
@@ -90,7 +93,7 @@ func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 		    answered_by = excluded.answered_by,
 		    answered_at = excluded.answered_at,
 		    updated_at = excluded.updated_at`,
-		a.RepoID, a.Branch, a.QuestionID, a.RunID, askOrdinal, a.Question, optionsJSON,
+		a.RepoID, a.Branch, a.QuestionID, a.RunID, a.AskOrdinal, a.Question, optionsJSON,
 		nullableText(a.File), nullableInt(a.Line),
 		a.Answer, nullableText(a.AnsweredBy), nullableText(a.AnsweredAt), now, now,
 	)

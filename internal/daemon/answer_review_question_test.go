@@ -359,7 +359,7 @@ func TestAnswerReviewQuestionDuplicateAnswerLeavesAParkedGateAlone(t *testing.T)
 	// Trimmed to the fields the prompt calls required - no kind, no weight -
 	// which is the other shape a model following that prompt produces.
 	appendAgentQuestionLine(t, dir, `{"id":"q1","question":"keep the legacy route?","options":["keep","remove"]}`)
-	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{ID: "q1", Answer: "keep"}); err != nil {
+	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{ID: "q1", Answer: "keep", AskOrdinal: 1}); err != nil {
 		t.Fatalf("seed answer: %v", err)
 	}
 	// Assert the precondition rather than assuming it: an empty conversation

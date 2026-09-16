@@ -146,7 +146,7 @@ func TestReviewStep_AnswerRacingTheParkStillReachesTheReviewer(t *testing.T) {
 	waitForReviewStatus(t, database, run.ID, types.StepStatusAwaitingApproval)
 
 	// The answer the race stranded: on disk, with no gate release behind it.
-	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain"}); err != nil {
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append the stranded answer: %v", err)
 	}
 
@@ -189,7 +189,7 @@ func appendQA(t *testing.T, dir, id, answer string) {
 	if err := appendAgentQuestionLine(dir, fmt.Sprintf(`{"id":%q,"question":"keep the legacy route?","options":["keep","remove"]}`, id)); err != nil {
 		t.Fatal(err)
 	}
-	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{ID: id, Answer: answer, AnsweredBy: "captain"}); err != nil {
+	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{ID: id, Answer: answer, AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatal(err)
 	}
 	// Assert the seed TOOK. "Nothing is open" is also true of a conversation
