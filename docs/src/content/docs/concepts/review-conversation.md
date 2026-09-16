@@ -88,14 +88,17 @@ and a per-adapter support matrix for a capability the agent already has.
   An `id` is chosen by the reviewer and is only unique by accident - every
   review turn of a run appends to the same file, and a cold rereview in a fix
   round is shown only the questions still open, so it can reuse `q1` for a
-  genuinely different question. A question is therefore settled only once it has
-  **as many answers as it has been asked**: a re-ask re-opens the entry and
-  parks the gate again rather than inheriting the previous answer. That is
-  counted from the lines themselves rather than compared by timestamp, because
-  the two files are appended independently and `asked_at`/`answered_at` are
-  optional. The same reason makes the per-branch answer store keyed by run as
-  well as by question id, so two runs that both use `q1` keep their own settled
-  decisions instead of one overwriting the other's.
+  genuinely different question. So each **ask** is settled only by an answer of
+  its own: an answer carries the `ask_ordinal` it settles (see below), and a
+  re-ask re-opens the entry and parks the gate again rather than inheriting an
+  answer written before it. An answer with no `ask_ordinal` - a file written
+  before that field, or an answer for an `id` nobody asked - pairs positionally
+  instead, settling a question once it has as many answers as it has been
+  asked. Neither rule compares timestamps, because the two files are appended
+  independently and `asked_at`/`answered_at` are optional. The same reason makes
+  the per-branch answer store keyed by run as well as by question id, so two
+  runs that both use `q1` keep their own settled decisions instead of one
+  overwriting the other's.
 - `kind` is `question` or `retract`. A retracted question is closed: it never
   blocks the step and never needs an answer. Re-asking it revives it, and it
   comes back open rather than carrying whatever answer preceded the retraction.
@@ -111,11 +114,17 @@ and a per-adapter support matrix for a capability the agent already has.
 ### answers.ndjson
 
 ```json
-{"id":"q1","answer":"Keep behind a flag","answered_by":"captain","answered_at":"2026-09-15T13:31:40Z"}
+{"id":"q1","answer":"Keep behind a flag","answered_by":"captain","answered_at":"2026-09-15T13:31:40Z","ask_ordinal":1}
 ```
 
 Written by `no-mistakes axi answer`, or by any operator process appending the
-same line. The last line for an `id` wins, so a correction is another append.
+same line. `ask_ordinal` is which ask of that `id` the answer settles, 1-based,
+stamped by the writer with the `id`'s ask count at the moment of the append. The
+last line for the same `id` and `ask_ordinal` wins, so a correction is another
+append - and it corrects the ask it was written for, so it never pre-answers a
+later re-ask of that `id`. That binding has to come from the writer: at read
+time two asks and two answers look identical whether the second answer corrects
+the first ask or answers the re-ask, and that ambiguity is the whole defect.
 
 An answer for an unknown or retracted `id` is recorded and ignored, never an
 error: the writer may be racing a retraction it has not read yet.

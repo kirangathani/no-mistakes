@@ -92,11 +92,22 @@ type Question struct {
 }
 
 // Answer is one line of answers.ndjson.
+//
+// AskOrdinal is which ASK of that id this answer settles, 1-based, stamped by
+// the writer with the id's ask count at the moment of the append. It is what
+// tells a correction to an already-settled ask apart from an answer to a later
+// re-ask of the same id: the two files are appended independently, so at load
+// time two asks and two answers are otherwise indistinguishable between those
+// two sequences, and reading them as the second let a genuinely different
+// question arrive pre-answered. Absent (0) in a file written before this field
+// existed, and in an answer for an id nobody asked; such an answer keeps the
+// positional pairing below.
 type Answer struct {
 	ID         string `json:"id"`
 	Answer     string `json:"answer"`
 	AnsweredBy string `json:"answered_by,omitempty"`
 	AnsweredAt string `json:"answered_at,omitempty"`
+	AskOrdinal int    `json:"ask_ordinal,omitempty"`
 }
 
 // Entry is a question resolved against every later line about the same id:
@@ -226,14 +237,17 @@ func Load(dir string) (Conversation, error) {
 	// Open() was empty, no finding was emitted, the gate never parked, and a
 	// major question reached nobody.
 	//
-	// So a question is settled only once it has AS MANY answers as it has been
-	// asked. Counting is deliberate rather than comparing timestamps: the two
-	// files are appended independently, asked_at/answered_at are optional and
-	// written by whoever appends the line, and second-granularity RFC3339 from
-	// two writers cannot order a fast exchange. Counting needs nothing but the
-	// lines themselves. It fails toward OPEN - a re-ask asks again rather than
-	// assuming the previous answer still applies - which is the safe direction
-	// here and also the behaviour under a byte-truncated answers file.
+	// So an ask is settled only by an answer of its own. An answer carrying an
+	// AskOrdinal binds to THAT ask and nothing else; one without keeps the
+	// positional rule older files rely on, where a question is settled once it
+	// has AS MANY answers as it has been asked. Neither rule compares
+	// timestamps: the two files are appended independently, asked_at and
+	// answered_at are optional and written by whoever appends the line, and
+	// second-granularity RFC3339 from two writers cannot order a fast
+	// exchange. Both fail toward OPEN - a re-ask asks again rather than
+	// inheriting an answer written before it, including a correction to the
+	// ask it supersedes - which is the safe direction here and also the
+	// behaviour under a byte-truncated answers file.
 	asks := make(map[string]int, len(questionLines))
 	// Every accepted question line per id, in file order, so an earlier ask
 	// survives a later one for the durable store's benefit.
@@ -314,42 +328,20 @@ func Load(dir string) (Conversation, error) {
 		answersByID[a.ID] = append(answersByID[a.ID], a)
 	}
 
-	// Attach the newest answer only to a question that has been answered at
-	// least as many times as it was asked; see the asks comment above. A
-	// question left short of that stays OPEN and parks the gate again.
-	for id, entry := range byID {
-		answers := answersByID[id]
-		if len(answers) == 0 || len(answers) < asks[id] {
-			continue
-		}
-		answer := answers[len(answers)-1]
-		entry.Answer = &answer
-	}
-
-	// Pair the Nth ask of an id with its Nth answer. The LAST ask of an id
-	// also absorbs every surplus answer, because an answer arriving after the
-	// final ask is a CORRECTION to it - the same rule Entry uses, so a
-	// correction still replaces rather than accumulating.
+	// Pair every ask with the answer that settled it, and let the LAST ask of
+	// an id be the entry's state: the gate needs the latest, the durable store
+	// needs them all, and one rule for both keeps them from disagreeing.
 	seen := make(map[string]int, len(lines))
 	conv.Asks = make([]Ask, 0, len(askOrder))
 	for _, id := range askOrder {
 		seen[id]++
 		ordinal := seen[id]
 		ask := Ask{Ordinal: ordinal, Question: lines[id][ordinal-1]}
-		answers := answersByID[id]
-		switch {
-		case ordinal < asks[id]:
-			// An earlier ask: settled by its own answer if one arrived.
-			if ordinal-1 < len(answers) {
-				answer := answers[ordinal-1]
-				ask.Answer = &answer
-			}
-		case len(answers) >= asks[id]:
-			// The final ask, settled only once every ask has an answer.
-			answer := answers[len(answers)-1]
-			ask.Answer = &answer
-		}
+		ask.Answer = settlingAnswer(answersByID[id], ordinal, asks[id])
 		conv.Asks = append(conv.Asks, ask)
+		if ordinal == asks[id] {
+			byID[id].Answer = ask.Answer
+		}
 	}
 
 	conv.Entries = make([]Entry, 0, len(order))
@@ -360,6 +352,40 @@ func Load(dir string) (Conversation, error) {
 		conv.Notes = append(conv.Notes, "review conversation file exceeded its size bound; older lines were not read")
 	}
 	return conv, nil
+}
+
+// settlingAnswer returns the answer that settles the ordinal-th of total asks
+// of one id, or nil while that ask is still open.
+//
+// An answer stamped with this ordinal wins, the latest such answer replacing an
+// earlier one so a correction to the same ask still replaces. Only when no
+// answer names this ask do the unstamped ones pair positionally, which is what
+// a file written before ask_ordinal existed carries.
+func settlingAnswer(answers []Answer, ordinal, total int) *Answer {
+	var bound *Answer
+	var unbound []Answer
+	for _, a := range answers {
+		switch {
+		case a.AskOrdinal == ordinal:
+			bound = &a
+		case a.AskOrdinal > 0:
+			// Stamped for a different ask, so it settles nothing here.
+		default:
+			unbound = append(unbound, a)
+		}
+	}
+	if bound != nil {
+		return bound
+	}
+	switch {
+	case ordinal < total:
+		if ordinal-1 < len(unbound) {
+			return &unbound[ordinal-1]
+		}
+	case len(unbound) >= total:
+		return &unbound[len(unbound)-1]
+	}
+	return nil
 }
 
 // AppendAnswer appends one answer, creating the directory on first use.

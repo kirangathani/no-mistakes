@@ -336,8 +336,7 @@ func TestAnswerReviewQuestionOrphanAnswerLeavesAParkedGateAlone(t *testing.T) {
 		t.Fatalf("open = %d, want 0", result.Open)
 	}
 
-	// Recorded durably all the same: the answer is on disk for any reviewer
-	// that later asks this id.
+	// Recorded durably all the same, so it is never silently lost.
 	answers, readErr := os.ReadFile(filepath.Join(conversationDir(p, runID), reviewqa.AnswersFile))
 	if readErr != nil || !strings.Contains(string(answers), "q-typo") {
 		t.Fatalf("the orphan answer was not recorded: err=%v content=%q", readErr, answers)
@@ -386,5 +385,43 @@ func TestAnswerReviewQuestionDuplicateAnswerLeavesAParkedGateAlone(t *testing.T)
 	}
 	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatalf("the duplicate answer stole the operator's verdict: %v", err)
+	}
+}
+
+// TestAnswerReviewQuestionCorrectionDoesNotPreAnswerAReAsk drives the whole
+// answer path for the sequence every step of which is ordinary: the reviewer
+// asks q1, the operator answers it, the operator then corrects that answer -
+// which axi answer advertises as recorded for the reviewer's next checkpoint -
+// and a later cold rereview, shown only the still-OPEN questions, re-uses q1
+// for a genuinely different question.
+//
+// Before the answer carried the ask it settles, that left two asks and two
+// answers, which reviewqa.Load could only read as "settled": the new question
+// arrived pre-answered, no question finding was emitted, and the gate never
+// parked on it.
+func TestAnswerReviewQuestionCorrectionDoesNotPreAnswerAReAsk(t *testing.T) {
+	m, p, runID := answerFixture(t)
+	dir := conversationDir(p, runID)
+	appendAgentQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
+
+	for _, answer := range []string{"keep", "remove, on reflection"} {
+		if _, err := m.HandleAnswerReviewQuestion(runID, "q1", answer, "captain"); err != nil {
+			t.Fatalf("answer %q: %v", answer, err)
+		}
+	}
+
+	appendAgentQuestionLine(t, dir, `{"id":"q1","question":"should /v3 answer too?","options":["yes","no"]}`)
+
+	conv, err := reviewqa.Load(dir)
+	if err != nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+	open := conv.Open()
+	if len(open) != 1 || open[0].Question.Question != "should /v3 answer too?" {
+		t.Fatalf("the re-asked question arrived pre-answered: %+v", conv.Entries)
+	}
+	settled := conv.SettledAsks()
+	if len(settled) != 1 || settled[0].Question.Question != "keep the legacy route?" || settled[0].Answer.Answer != "remove, on reflection" {
+		t.Fatalf("the correction did not stay bound to the ask it corrects: %#v", settled)
 	}
 }

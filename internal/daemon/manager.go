@@ -1754,6 +1754,9 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 //     snapshot below, which exists because the open count alone would let such
 //     an answer steal the verdict on a gate parked on ordinary findings.
 //
+// Every answer is stamped with the ask it settles, so a correction binds to the
+// already-settled ask instead of pre-answering a later re-ask of the same id.
+//
 // The write happens before the release decision, so a failure to resume never
 // loses the answer - the next answer, or a recovered gate, finds it on disk.
 func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answeredBy string) (*ipc.AnswerReviewQuestionResult, error) {
@@ -1790,12 +1793,27 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	// failed with "no step awaiting approval". A read failure here is not
 	// fatal: the answer has not been written yet, and an unknown prior state
 	// simply means this answer cannot prove it closed a question.
+	//
+	// The same snapshot supplies the ask this answer settles. reviewqa cannot
+	// recover that at load time - the two files are appended independently, so
+	// two asks and two answers read the same whether the second answer is a
+	// correction to the first ask or the answer to a re-ask - and binding it
+	// here, at the only writer of answers.ndjson, is what stops a correction
+	// pre-answering the next re-ask of that id. An unreadable conversation
+	// leaves it unstamped, which is the positional pairing reviewqa already
+	// applies to a file written before the field existed.
 	wasOpen := false
+	askOrdinal := 0
 	if before, err := reviewqa.Load(dir); err == nil {
 		for _, e := range before.Open() {
 			if e.ID == questionID {
 				wasOpen = true
 				break
+			}
+		}
+		for _, ask := range before.Asks {
+			if ask.Question.ID == questionID {
+				askOrdinal = ask.Ordinal
 			}
 		}
 	}
@@ -1804,6 +1822,7 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 		ID:         questionID,
 		Answer:     answer,
 		AnsweredBy: strings.TrimSpace(answeredBy),
+		AskOrdinal: askOrdinal,
 	}); err != nil {
 		return nil, err
 	}
@@ -1822,8 +1841,9 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 		return result, nil
 	}
 	if !wasOpen {
-		// Recorded durably and deliberately inert: the answer is on disk for
-		// any reviewer that later asks this id, and no gate is touched.
+		// Recorded durably and deliberately inert: it corrects the ask it is
+		// stamped with, and no gate is touched. A later re-ask of this id is a
+		// different question and stays open until it is answered itself.
 		result.Note = "recorded; it answered no open question, so no review gate was released"
 		return result, nil
 	}

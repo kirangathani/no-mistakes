@@ -411,3 +411,50 @@ func TestSettledAsksLeaveAReAskShortOfAnAnswerOpen(t *testing.T) {
 		t.Fatalf("ask 1 should be settled by its own answer and ask 2 open: %#v", settled)
 	}
 }
+
+// TestASurplusAnswerBindsToItsOwnAskAndLeavesTheReAskOpen is the regression for
+// the hole the ask/answer counting alone left open. A correction sent after an
+// ask was already settled is an ordinary thing to do - axi answer advertises
+// it - and it used to make asks and answers match, so the NEXT re-ask of that
+// id (a cold rereview is shown only the OPEN questions, so it starts numbering
+// at q1 again for a genuinely different question) arrived pre-answered: nothing
+// was open, no question finding was emitted, the gate never parked, and a major
+// question reached nobody.
+//
+// TestSettledAsksTreatASurplusAnswerAsACorrection has the surplus answer with
+// no re-ask, and TestSettledAsksLeaveAReAskShortOfAnAnswerOpen has the re-ask
+// with no surplus; neither exercises the two together.
+func TestASurplusAnswerBindsToItsOwnAskAndLeavesTheReAskOpen(t *testing.T) {
+	dir := t.TempDir()
+	appendQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"Is the legacy route deliberate?","options":["yes","no"],"weight":"major"}`)
+	// Both stamped for ask 1, as the daemon stamps them: the second is the
+	// operator correcting the first.
+	for _, a := range []string{"yes", "no, on reflection"} {
+		if err := AppendAnswer(dir, Answer{ID: "q1", Answer: a, AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if settled, err := Load(dir); err != nil {
+		t.Fatal(err)
+	} else if len(settled.Answered()) != 1 {
+		t.Fatalf("the seeded ask did not read back as answered: %+v", settled)
+	}
+
+	appendQuestionLine(t, dir, `{"id":"q1","question":"Should the new /v3 route answer too?","options":["yes","no"]}`)
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := conv.Open()
+	if len(open) != 1 || open[0].Question.Question != "Should the new /v3 route answer too?" {
+		t.Fatalf("the re-ask must stay open and park the gate again: %+v", conv.Entries)
+	}
+	settled := conv.SettledAsks()
+	if len(settled) != 1 || settled[0].Ordinal != 1 {
+		t.Fatalf("want only ask 1 settled: %#v", settled)
+	}
+	if settled[0].Question.Question != "Is the legacy route deliberate?" || settled[0].Answer.Answer != "no, on reflection" {
+		t.Fatalf("ask 1 lost its correction or took the wrong question: %#v / %#v", settled[0].Question, settled[0].Answer)
+	}
+}
