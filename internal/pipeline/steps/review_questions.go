@@ -295,17 +295,6 @@ func reviewQuestionFindingID(questionID string) string {
 	return "question-" + questionID
 }
 
-// ReviewQuestionID recovers the question id from a review-question finding's
-// ID, reporting false for any other finding. Consumers outside the pipeline
-// (axi rendering, the PR body) use it rather than re-deriving the prefix.
-func ReviewQuestionID(findingID string) (string, bool) {
-	id, ok := strings.CutPrefix(strings.TrimSpace(findingID), "question-")
-	if !ok || id == "" {
-		return "", false
-	}
-	return id, true
-}
-
 // openReviewQuestionFindings turns each unanswered question into one ask-user
 // warning.
 //

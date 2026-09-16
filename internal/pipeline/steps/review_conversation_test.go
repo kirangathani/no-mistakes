@@ -126,7 +126,7 @@ func TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers(t *testing.T) 
 	if !strings.Contains(q.Description, "Keep answering | Remove it") {
 		t.Fatalf("question finding lost its options: %q", q.Description)
 	}
-	if id, ok := ReviewQuestionID(q.ID); !ok || id != "q1" {
+	if q.ID != "question-q1" {
 		t.Fatalf("finding id %q does not carry the question id", q.ID)
 	}
 	// An open question must NOT read as auto-fixable work: there is nothing
@@ -883,7 +883,7 @@ func TestOpenReviewQuestionFindingsAreBounded(t *testing.T) {
 		t.Fatalf("emitted %d findings for %d open questions, want %d plus one marker", len(findings), open, maxReviewQuestionFindings)
 	}
 	marker := findings[len(findings)-1]
-	if _, ok := ReviewQuestionID(marker.ID); ok {
+	if strings.HasPrefix(marker.ID, "question-") {
 		t.Fatalf("the omission marker looks like an answerable question: %+v", marker)
 	}
 	// It must still park and still stand aside from every auto-resolver.
