@@ -388,7 +388,8 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		tested := collectTestingDetails(sr, stepRounds)
 		artifacts := collectTestingArtifacts(sr, stepRounds, opts)
 		scenarios := collectTestingScenarios(sr, stepRounds)
-		liveValidation := renderLiveValidationLine(scenarios, collectTestingVerdict(sr, stepRounds), collectTestingEvidenceReason(sr, stepRounds), collectTestingEvidenceSource(sr, stepRounds))
+		evidenceSource := collectTestingEvidenceSource(sr, stepRounds)
+		liveValidation := renderLiveValidationLine(scenarios, collectTestingVerdict(sr, stepRounds), collectTestingEvidenceReason(sr, stepRounds), evidenceSource)
 		if testingSummary == "" && len(tested) == 0 && len(artifacts) == 0 && liveValidation == "" {
 			return "## Testing\n\n- " + line
 		}
@@ -414,7 +415,7 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 			b.WriteString(liveValidation)
 			b.WriteString("\n")
 		}
-		if table := renderScenarioTable(scenarios, opts.flavor); table != "" {
+		if table := publishedScenarioTable(scenarios, evidenceSource, len(artifacts) > 0, opts.flavor); table != "" {
 			b.WriteString("\n")
 			b.WriteString(table)
 			b.WriteString("\n")
@@ -1581,7 +1582,7 @@ func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.F
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	if table := renderScenarioTable(findings.Scenarios, flavor); table != "" {
+	if table := publishedScenarioTable(findings.Scenarios, findings.EvidenceSource, len(findings.Artifacts) > 0, flavor); table != "" {
 		b.WriteString("\n")
 		b.WriteString(table)
 		b.WriteString("\n")

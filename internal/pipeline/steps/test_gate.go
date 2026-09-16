@@ -3,7 +3,10 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -256,9 +259,24 @@ func sameRunIntent(current *string, prior string) bool {
 }
 
 func reuseDecision(priorRunID string, prior Findings) testEvidenceDecision {
+	// The originating run is carried structurally rather than parsed back out
+	// of the predecessor's reason: a reused verdict is itself reusable, and
+	// only the run that actually drove the agent holds artifacts, so a chain
+	// has to keep naming that run rather than the intermediate it read from.
+	origin := strings.TrimSpace(prior.EvidenceOriginRunID)
+	if origin == "" {
+		origin = priorRunID
+	}
 	reused := Findings{
 		Scenarios: prior.Scenarios,
-		Verdict:   types.TestVerdictGo,
+		// The artifacts come along so the PR can still SHOW the evidence
+		// behind the verdict it publishes. gatedTestOutcome copies the
+		// originating run's evidence directory into this run's before
+		// publication, and clears this list if that is not possible, so the
+		// body never cites a file it does not carry.
+		Artifacts:           prior.Artifacts,
+		EvidenceOriginRunID: origin,
+		Verdict:             types.TestVerdictGo,
 		// The head is the one whose product behavior these scenarios were
 		// actually driven against, carried forward rather than restamped onto
 		// this run's head. It is what keeps the reuse honest: every consumer
@@ -267,36 +285,45 @@ func reuseDecision(priorRunID string, prior Findings) testEvidenceDecision {
 		// live turn. See gatedTestOutcome.
 		TestedHeadSHA: prior.TestedHeadSHA,
 	}
-	// Reuse chains: a reused verdict is itself reusable, which is the whole
-	// point on a branch that re-runs several times, and only a run that
-	// actually drove the agent holds artifacts. So when the predecessor is
-	// itself a reuse we carry ITS reason forward, which keeps naming the
-	// originating run instead of the intermediate one that holds nothing.
-	provenance := fmt.Sprintf("reused from run %s", priorRunID)
-	if prior.EvidenceSource == types.TestEvidenceSourceReused {
-		provenance = carriedProvenance(prior.EvidenceReason, priorRunID)
-	}
 	return testEvidenceDecision{
 		Source: types.TestEvidenceSourceReused,
 		Reason: fmt.Sprintf(
-			"product files unchanged since %s; %s",
+			"product files unchanged since %s; reused from run %s",
 			shortSHA(prior.TestedHeadSHA),
-			provenance,
+			origin,
 		),
 		Reused: reused,
 	}
 }
 
-// carriedProvenance extracts the originating run's pointer from a reused
-// verdict's own recorded reason, so a chain keeps naming the run that actually
-// drove the agent instead of the intermediate run it read the verdict from,
-// which holds no artifacts. An unreadable predecessor reason degrades to
-// naming the immediate predecessor, which is the most this run can vouch for.
-func carriedProvenance(priorReason, priorRunID string) string {
-	if _, carried, found := strings.Cut(priorReason, "; "); found && strings.HasPrefix(carried, "reused from run ") {
-		return carried
+// carryOriginEvidence copies the originating run's evidence artifacts into this
+// run's evidence directory, which is the only directory publication reads.
+//
+// The originating run's directory is its run ID under the same shared root as
+// this run's (see Executor.runEvidenceDir). That path is resolved here and
+// never published: it is a host filesystem path, the PR redactor only removes
+// home directories, and test.evidence.local_root may be any absolute path.
+func carryOriginEvidence(sctx *pipeline.StepContext, originRunID string) error {
+	originRunID = strings.TrimSpace(originRunID)
+	if originRunID == "" {
+		return errors.New("no originating run recorded")
 	}
-	return fmt.Sprintf("reused from run %s", priorRunID)
+	dest := testEvidenceDir(sctx)
+	if dest == "" {
+		return errors.New("this run has no evidence directory")
+	}
+	src := filepath.Join(filepath.Dir(dest), originRunID)
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("read the originating run's evidence: %w", err)
+	}
+	if len(entries) == 0 {
+		return errors.New("the originating run's evidence directory is empty")
+	}
+	if err := copyDirContents(src, dest); err != nil {
+		return fmt.Errorf("copy the originating run's evidence: %w", err)
+	}
+	return nil
 }
 
 // gatedTestOutcome builds the step outcome for a run whose live-evidence agent
@@ -337,6 +364,21 @@ func gatedTestOutcome(
 	}
 	findings.EvidenceSource = gate.Source
 	findings.EvidenceReason = gate.Reason
+	// A reused verdict publishes the scenarios it was earned with, so the PR
+	// has to be able to SHOW their evidence: a verdict with nothing visible
+	// behind it is a worse claim than a stale one. The artifacts live in the
+	// originating run's evidence directory, and publication only ever reads
+	// THIS run's, so they are copied across here, before the PR step runs.
+	// Failing that, the artifact list is cleared and the renderer drops the
+	// scenario table with it, so the body never cites a file it does not
+	// carry. Retention (default 14 days) ages evidence directories out, so a
+	// missing source is expected rather than exceptional.
+	if len(findings.Artifacts) > 0 {
+		if err := carryOriginEvidence(sctx, findings.EvidenceOriginRunID); err != nil {
+			sctx.Log(fmt.Sprintf("could not carry run %s's evidence forward (%v); publishing the verdict without its scenario table", findings.EvidenceOriginRunID, err))
+			findings.Artifacts = nil
+		}
+	}
 	findings.TestingSummary = gate.Reason
 	findings.Summary = baselineSummary
 	findings.Items = append(append([]Finding(nil), baselineFindings...), verdictFindings(findings)...)

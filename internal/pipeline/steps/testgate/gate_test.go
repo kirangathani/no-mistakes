@@ -185,10 +185,16 @@ func recordPriorVerdictWithIntent(t *testing.T, sctx *pipeline.StepContext, head
 			Live:     true,
 			Evidence: "checkout.png",
 		}},
+		Artifacts:      []types.TestArtifact{{Label: "checkout", Path: "checkout.png"}},
 		Verdict:        verdict,
 		TestedHeadSHA:  headSHA,
 		EvidenceSource: types.TestEvidenceSourceAgent,
 	}
+	// A run that drove the agent left its artifacts on disk, in its own
+	// evidence directory. The reuse path copies them into the reusing run's
+	// directory, so a fixture without them would exercise the fallback rather
+	// than the carry.
+	writeRunEvidence(t, sctx, run.ID, "checkout.png")
 	raw, err := json.Marshal(findings)
 	if err != nil {
 		t.Fatal(err)
@@ -200,6 +206,20 @@ func recordPriorVerdictWithIntent(t *testing.T, sctx *pipeline.StepContext, head
 		t.Fatal(err)
 	}
 	return run.ID
+}
+
+// writeRunEvidence places an evidence file in a run's own evidence directory,
+// which is its run ID under the same root the step context's directory sits in
+// (see Executor.runEvidenceDir).
+func writeRunEvidence(t *testing.T, sctx *pipeline.StepContext, runID, name string) {
+	t.Helper()
+	dir := filepath.Join(filepath.Dir(sctx.EvidenceDir), runID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("\x89PNG evidence"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestTestStep_NewerNonGoVerdictBlocksReuseOfAnOlderGo: reuse consults this
@@ -411,6 +431,18 @@ func TestTestStep_ReusesAGoVerdictWhenProductFilesAreUnchanged(t *testing.T) {
 	}
 	if findings.TestedHeadSHA == head {
 		t.Fatal("a reused verdict must not be restamped onto this run's head")
+	}
+	// The verdict is published with the evidence behind it: the originating
+	// run's artifacts are carried, and its evidence file physically reaches
+	// this run's directory, which is the only one publication reads.
+	if len(findings.Artifacts) != 1 || findings.Artifacts[0].Path != "checkout.png" {
+		t.Fatalf("artifacts = %+v, want the originating run's evidence carried forward", findings.Artifacts)
+	}
+	if findings.EvidenceOriginRunID != priorRunID {
+		t.Fatalf("origin run = %q, want %q", findings.EvidenceOriginRunID, priorRunID)
+	}
+	if _, err := os.Stat(filepath.Join(sctx.EvidenceDir, "checkout.png")); err != nil {
+		t.Fatalf("the originating run's evidence file did not reach this run's directory: %v", err)
 	}
 }
 

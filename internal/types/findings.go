@@ -359,6 +359,13 @@ type Findings struct {
 	// payload written before the gate existed.
 	EvidenceSource string `json:"evidence_source,omitempty"`
 	EvidenceReason string `json:"evidence_reason,omitempty"`
+	// EvidenceOriginRunID is the run that actually drove the live-evidence
+	// agent for this verdict. It is empty when this run drove it itself, and
+	// on a reuse it names the ORIGINATING run rather than the run the verdict
+	// was read from, so a chain of reuses keeps pointing at the only run that
+	// holds artifacts. Carrying it structurally is what lets a reuse copy that
+	// run's evidence forward instead of parsing a run id back out of prose.
+	EvidenceOriginRunID string `json:"evidence_origin_run_id,omitempty"`
 	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
@@ -383,6 +390,7 @@ type findingsWire struct {
 	TestedHeadSHA       string             `json:"tested_head_sha"`
 	EvidenceSource      string             `json:"evidence_source"`
 	EvidenceReason      string             `json:"evidence_reason"`
+	EvidenceOriginRunID string             `json:"evidence_origin_run_id"`
 	UnvalidatedSinceSHA string             `json:"unvalidated_since_sha"`
 	RiskLevel           string             `json:"risk_level"`
 	RiskRationale       string             `json:"risk_rationale"`
@@ -414,6 +422,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		TestedHeadSHA:       wire.TestedHeadSHA,
 		EvidenceSource:      wire.EvidenceSource,
 		EvidenceReason:      wire.EvidenceReason,
+		EvidenceOriginRunID: wire.EvidenceOriginRunID,
 		UnvalidatedSinceSHA: wire.UnvalidatedSinceSHA,
 		RiskLevel:           wire.RiskLevel,
 		RiskRationale:       wire.RiskRationale,

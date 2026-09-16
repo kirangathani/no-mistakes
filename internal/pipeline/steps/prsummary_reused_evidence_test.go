@@ -2,9 +2,12 @@ package steps
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -147,5 +150,98 @@ func TestReuseReasonNamesTheRunNotAHostPath(t *testing.T) {
 	}
 	if decision.Reused.TestedHeadSHA != reusedDrivenHeadSHA {
 		t.Fatalf("reused head = %q, want the head the scenarios were driven at", decision.Reused.TestedHeadSHA)
+	}
+}
+
+// The reuse path exists to avoid re-deriving evidence, not to publish a
+// verdict with nothing behind it. So a reused verdict carries the originating
+// run's artifacts, and gatedTestOutcome copies that run's evidence directory
+// into this run's - the only directory publication reads - so the scenario
+// table's citations still resolve.
+func TestReuseCarriesTheOriginatingRunsArtifactsAndEvidenceFiles(t *testing.T) {
+	prior := Findings{
+		TestedHeadSHA: reusedDrivenHeadSHA,
+		Scenarios:     []types.TestScenario{{Name: "s", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"}},
+		Artifacts:     []types.TestArtifact{{Label: "checkout", Path: "checkout.png"}},
+	}
+	decision := reuseDecision("run-1", prior)
+	if len(decision.Reused.Artifacts) != 1 || decision.Reused.Artifacts[0].Path != "checkout.png" {
+		t.Fatalf("artifacts = %+v, want the originating run's list carried forward", decision.Reused.Artifacts)
+	}
+	if decision.Reused.EvidenceOriginRunID != "run-1" {
+		t.Fatalf("origin run = %q, want run-1", decision.Reused.EvidenceOriginRunID)
+	}
+
+	// A reuse OF a reuse keeps naming the run that actually drove the agent,
+	// because that is the only run whose directory holds anything.
+	chained := reuseDecision("run-2", Findings{
+		TestedHeadSHA:       reusedDrivenHeadSHA,
+		EvidenceSource:      types.TestEvidenceSourceReused,
+		EvidenceOriginRunID: "run-1",
+		Artifacts:           prior.Artifacts,
+	})
+	if chained.Reused.EvidenceOriginRunID != "run-1" {
+		t.Fatalf("chained origin = %q, want the originating run run-1", chained.Reused.EvidenceOriginRunID)
+	}
+	if !strings.Contains(chained.Reason, "reused from run run-1") {
+		t.Fatalf("chained reason %q does not name the originating run", chained.Reason)
+	}
+}
+
+// carryOriginEvidence is the copy itself. Its failure modes are ordinary -
+// retention ages directories out - so each one has to be a clean error the
+// caller can turn into "publish the verdict without the table", never a panic
+// and never a silent success.
+func TestCarryOriginEvidence(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "run-2")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sctx := &pipeline.StepContext{EvidenceDir: dest}
+
+	if err := carryOriginEvidence(sctx, ""); err == nil {
+		t.Error("an unrecorded originating run must be an error")
+	}
+	if err := carryOriginEvidence(sctx, "run-1"); err == nil {
+		t.Error("a missing originating directory must be an error, not a silent success")
+	}
+
+	src := filepath.Join(root, "run-1")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := carryOriginEvidence(sctx, "run-1"); err == nil {
+		t.Error("an empty originating directory must be an error")
+	}
+
+	if err := os.WriteFile(filepath.Join(src, "checkout.png"), []byte("\x89PNG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := carryOriginEvidence(sctx, "run-1"); err != nil {
+		t.Fatalf("carrying a populated directory forward: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "checkout.png")); err != nil {
+		t.Fatalf("evidence file did not reach this run's directory: %v", err)
+	}
+}
+
+// The table and its evidence stand or fall together: it renders when the
+// artifacts were carried, and is dropped when they could not be, so a PR never
+// cites a file it does not carry. A freshly driven run is unaffected either
+// way, including one whose scenarios cite commands rather than files.
+func TestPublishedScenarioTableFollowsTheCarriedArtifacts(t *testing.T) {
+	scenarios := []types.TestScenario{{Name: "checkout", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"}}
+
+	if table := publishedScenarioTable(scenarios, types.TestEvidenceSourceReused, true, prBodyMarkdown); table == "" {
+		t.Error("a reuse whose artifacts were carried must still show its scenario table")
+	}
+	if table := publishedScenarioTable(scenarios, types.TestEvidenceSourceReused, false, prBodyMarkdown); table != "" {
+		t.Errorf("a reuse with no carried artifacts must not cite evidence it lacks:\n%s", table)
+	}
+	for _, source := range []string{types.TestEvidenceSourceAgent, types.TestEvidenceSourceNoProductChange, ""} {
+		if table := publishedScenarioTable(scenarios, source, false, prBodyMarkdown); table == "" {
+			t.Errorf("source %q must render its table regardless of artifacts", source)
+		}
 	}
 }

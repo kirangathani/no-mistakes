@@ -20,11 +20,18 @@ import (
 // the PR attestation as live_validation for a consumer that must decide
 // whether this change was live validated without reading prose.
 
-// collectTestingScenarios returns the scenarios recorded for the test step,
-// reading the same findings payload the rest of the Testing section reads so a
-// step whose final findings were cleared by a fix still renders the evidence
+// testingEvidenceFindings parses the one findings payload the whole Testing
+// section reads, so every field below comes from the same record rather than
+// from five independent parses that could in principle disagree.
+// testingEvidenceFindingsJSON yields at most one payload: the step's own final
+// findings when they carry evidence metadata, else the last round that did, so
+// a step whose final findings were cleared by a fix still renders the evidence
 // its last round captured.
-func collectTestingScenarios(sr *db.StepResult, rounds []*db.StepRound) []types.TestScenario {
+//
+// collectTestingArtifacts deliberately stays separate: it needs the rendering
+// options and its own de-duplication, and it consumes the raw payload rather
+// than one field of it.
+func testingEvidenceFindings(sr *db.StepResult, rounds []*db.StepRound) (types.Findings, bool) {
 	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
 		if raw == nil || strings.TrimSpace(*raw) == "" {
 			continue
@@ -33,27 +40,23 @@ func collectTestingScenarios(sr *db.StepResult, rounds []*db.StepRound) []types.
 		if err != nil {
 			continue
 		}
-		if len(findings.Scenarios) > 0 {
-			return findings.Scenarios
-		}
+		return findings, true
 	}
-	return nil
+	return types.Findings{}, false
+}
+
+// collectTestingScenarios returns the scenarios recorded for the test step.
+func collectTestingScenarios(sr *db.StepResult, rounds []*db.StepRound) []types.TestScenario {
+	findings, _ := testingEvidenceFindings(sr, rounds)
+	return findings.Scenarios
 }
 
 // collectTestingVerdict returns the test step's recorded verdict, or an empty
 // string when the step predates the contract or recorded none.
 func collectTestingVerdict(sr *db.StepResult, rounds []*db.StepRound) string {
-	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
-		if raw == nil || strings.TrimSpace(*raw) == "" {
-			continue
-		}
-		findings, err := types.ParseFindingsJSON(*raw)
-		if err != nil {
-			continue
-		}
-		if types.IsKnownTestVerdict(findings.Verdict) {
-			return findings.Verdict
-		}
+	findings, _ := testingEvidenceFindings(sr, rounds)
+	if types.IsKnownTestVerdict(findings.Verdict) {
+		return findings.Verdict
 	}
 	return ""
 }
@@ -61,37 +64,15 @@ func collectTestingVerdict(sr *db.StepResult, rounds []*db.StepRound) string {
 // collectTestingEvidenceReason returns the Test step's recorded account of
 // which path its diff-class gate took, or "" for a step that predates the gate.
 func collectTestingEvidenceReason(sr *db.StepResult, rounds []*db.StepRound) string {
-	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
-		if raw == nil || strings.TrimSpace(*raw) == "" {
-			continue
-		}
-		findings, err := types.ParseFindingsJSON(*raw)
-		if err != nil {
-			continue
-		}
-		if reason := strings.TrimSpace(findings.EvidenceReason); reason != "" {
-			return reason
-		}
-	}
-	return ""
+	findings, _ := testingEvidenceFindings(sr, rounds)
+	return strings.TrimSpace(findings.EvidenceReason)
 }
 
 // collectTestingEvidenceSource returns the Test step's recorded evidence
 // source, or "" for a step recorded with the gate off or before it existed.
 func collectTestingEvidenceSource(sr *db.StepResult, rounds []*db.StepRound) string {
-	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
-		if raw == nil || strings.TrimSpace(*raw) == "" {
-			continue
-		}
-		findings, err := types.ParseFindingsJSON(*raw)
-		if err != nil {
-			continue
-		}
-		if source := strings.TrimSpace(findings.EvidenceSource); source != "" {
-			return source
-		}
-	}
-	return ""
+	findings, _ := testingEvidenceFindings(sr, rounds)
+	return strings.TrimSpace(findings.EvidenceSource)
 }
 
 // renderLiveValidationLine is the one-line answer to "was this live
@@ -164,6 +145,30 @@ func scenarioResultEmoji(result string) string {
 // an untested scenario's reason: a reader wants one column answering "on what
 // basis?", and for an untested scenario the unavailable capability or absence
 // of a live product surface is that basis.
+// publishedScenarioTable is renderScenarioTable with the reuse rule applied.
+//
+// A reused verdict's scenarios were driven in an EARLIER run, and their
+// Evidence column names that run's artifact files. gatedTestOutcome copies
+// those artifacts into this run's evidence directory so the table's citations
+// resolve, which is the point: a go verdict published with nothing visible
+// behind it is a weaker claim than one whose evidence a reviewer can open.
+//
+// When that copy was not possible - the originating directory aged out under
+// test.evidence.retention, or nothing was recorded - the artifact list is
+// cleared, and the table goes with it rather than citing files this PR does
+// not carry. The verdict line and the reuse reason still name the run that
+// holds the evidence, so nothing is concealed.
+//
+// hasArtifacts is only consulted for a reuse. A freshly driven run whose
+// scenarios cite commands rather than files legitimately has no artifacts, and
+// its table renders exactly as before.
+func publishedScenarioTable(scenarios []types.TestScenario, evidenceSource string, hasArtifacts bool, flavor prBodyFlavor) string {
+	if strings.TrimSpace(evidenceSource) == types.TestEvidenceSourceReused && !hasArtifacts {
+		return ""
+	}
+	return renderScenarioTable(scenarios, flavor)
+}
+
 func renderScenarioTable(scenarios []types.TestScenario, flavor prBodyFlavor) string {
 	if len(scenarios) == 0 {
 		return ""
