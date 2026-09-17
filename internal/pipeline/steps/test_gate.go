@@ -41,11 +41,12 @@ import (
 //     existing no-surface verdict and marks it automatic. Unlike the agent's
 //     own no-surface it does not park: the classification is mechanical, so
 //     there is nothing for a human to decide.
-//  2. This branch's NEWEST recorded test verdict is a go, earned at head H0
-//     under the same user intent this run carries, and no product file has
-//     changed between H0 and this head. That verdict still describes this
-//     head's product behavior against the same acceptance criteria, so it is
-//     recorded again with a pointer to the run that earned it.
+//  2. This run is not a fix round, and this branch's NEWEST recorded test
+//     verdict is a go, earned at head H0 under the same user intent this run
+//     carries, with no product file changed between H0 and this head. That
+//     verdict still describes this head's product behavior against the same
+//     acceptance criteria, so it is recorded again with a pointer to the run
+//     that earned it.
 //
 // A reused verdict is recorded AGAINST H0, never restamped onto this head: it
 // says "the product behavior these scenarios proved has not changed", which is
@@ -207,8 +208,19 @@ func matchNonProductPattern(file, pattern string) bool {
 // earned under intent A says nothing about intent B even at a byte-identical
 // product state: republishing it would publish go for criteria no scenario
 // ever exercised. sameRunIntent therefore fails open on any absence.
+//
+// A fix round is the fifth, and it declines reuse outright. A Test fix round
+// exists precisely because THIS run's own evidence reported a problem, and
+// GetBranchTestEvidence deliberately excludes the current run, so every
+// verdict reachable from here PREDATES the finding being fixed. The run's own
+// verdict is the authoritative one about this branch; preferring an older
+// run's go inverts the gate, and publishing a go that a live turn contradicted
+// minutes earlier is worse than paying for the turn again. The
+// no-product-file conclusion is untouched by this: it is a fact about the
+// diff rather than a claim about a verdict, and it stays correct in a fix
+// round.
 func reusableBranchVerdict(sctx *pipeline.StepContext, nonProduct []string) (testEvidenceDecision, bool) {
-	if sctx.DB == nil || sctx.Run == nil {
+	if sctx.DB == nil || sctx.Run == nil || sctx.Fixing {
 		return testEvidenceDecision{}, false
 	}
 	prior, err := sctx.DB.GetBranchTestEvidence(sctx.Run.RepoID, sctx.Run.Branch, sctx.Run.ID)
@@ -226,15 +238,11 @@ func reusableBranchVerdict(sctx *pipeline.StepContext, nonProduct []string) (tes
 	if parseErr != nil || findings.Verdict != types.TestVerdictGo || findings.TestedHeadSHA == "" {
 		return testEvidenceDecision{}, false
 	}
-	if findings.TestedHeadSHA == sctx.Run.HeadSHA && !sctx.Fixing {
+	if findings.TestedHeadSHA == sctx.Run.HeadSHA {
 		// Same head, nothing to diff.
 		return reuseDecision(prior.RunID, findings), true
 	}
-	rangeArg := findings.TestedHeadSHA + ".." + sctx.Run.HeadSHA
-	if sctx.Fixing {
-		rangeArg = findings.TestedHeadSHA
-	}
-	product, diffErr := diffProductPaths(sctx.Ctx, sctx.WorkDir, nonProduct, rangeArg)
+	product, diffErr := diffProductPaths(sctx.Ctx, sctx.WorkDir, nonProduct, findings.TestedHeadSHA+".."+sctx.Run.HeadSHA)
 	if diffErr != nil {
 		sctx.Log(fmt.Sprintf("could not diff against the head run %s validated (%v); running the live-evidence agent", prior.RunID, diffErr))
 		return testEvidenceDecision{}, false
