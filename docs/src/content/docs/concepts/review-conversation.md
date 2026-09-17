@@ -300,6 +300,34 @@ An answer settles only the question it answers. The finalize prompt says so
 explicitly: an answer of "that is intended" closes the question it names and
 gives the reviewer no licence to soften a finding it did not ask about.
 
+### The finalize turn is a full review pass
+
+That matters for the outstanding finding set. A review finding stays outstanding
+until a later round positively verifies it - covers its file in `reviewed_paths`
+and stops reporting it - and a fix round earns that right for the findings it
+dispatched to the fixer. An answer round dispatches nothing, so the findings it
+carries in are what it may verify.
+
+This is deliberate, and it rests on what a finalize turn actually is: its prompt
+is the whole review prompt plus the answers, over the same head, so it is a
+review pass and not a narrow re-read of one question. Its silence about a
+finding is worth exactly what any rereview's silence is worth, and the coverage
+rule still applies unchanged - a finding leaves only if that turn named its file
+and did not report it.
+
+The reason it must be allowed at all is the protocol's own instruction to prefix
+a finding contingent on an open question with `PENDING ANSWER (<id>)`. Such a
+finding is routine in a round that asks a question, and an answer frequently
+disproves it. Without this the reviewer could withdraw it and the carry-forward
+would re-inject it anyway, still pointing the operator at a question that is
+already settled, leaving no way to clear it but approving over it.
+
+The cost is stated rather than hidden: an answer round can also clear an
+unrelated finding that the same turn covered and did not re-report. For that to
+lose something real, the reviewer has to re-read unchanged code, name the file,
+and decline to report a defect that is still there - a reviewer contradicting
+itself rather than an answer overriding a verdict.
+
 ## What is persisted, and where the next cold reviewer reads it
 
 A mid-turn answer is not a gate response, so it cannot ride the existing
