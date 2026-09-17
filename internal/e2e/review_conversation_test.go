@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -517,6 +518,17 @@ func prConversationSection(body string) string {
 // pseudo-terminal, turns yolo on at a gate carrying an open question, and
 // requires the gate to still be parked afterwards.
 func TestReviewConversationTUIYoloLeavesTheQuestionOpen(t *testing.T) {
+	// The driver needs a pty to make the TUI behave as it does for an
+	// operator, so it is a python3 script using pty.fork(): Unix-only, and on
+	// a machine with no python3 this is a missing tool rather than a product
+	// regression. Skipping says which, instead of failing the suite in a way
+	// that reads like a defect.
+	if runtime.GOOS == "windows" {
+		t.Skip("the TUI driver uses pty.fork(), which is Unix-only")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 is not installed; it drives the TUI through a pty")
+	}
 	driver, err := filepath.Abs(filepath.Join("testdata", "tui_yolo_driver.py"))
 	if err != nil {
 		t.Fatalf("resolve tui driver: %v", err)
