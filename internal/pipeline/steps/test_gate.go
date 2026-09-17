@@ -346,7 +346,7 @@ func carryOriginEvidence(sctx *pipeline.StepContext, originRunID string, artifac
 	if len(entries) == 0 {
 		return nil, errors.New("the originating run's evidence directory is empty")
 	}
-	if err := copyDirContents(src, dest); err != nil {
+	if err := copyEvidenceFiles(src, dest); err != nil {
 		return nil, fmt.Errorf("copy the originating run's evidence: %w", err)
 	}
 	carried, ok := rebaseCarriedArtifacts(artifacts, dest)
@@ -354,6 +354,58 @@ func carryOriginEvidence(sctx *pipeline.StepContext, originRunID string, artifac
 		return nil, errors.New("no carried file artifact arrived in this run's evidence directory")
 	}
 	return carried, nil
+}
+
+// copyEvidenceFiles copies regular files and directories, and NOTHING else,
+// from one run's evidence directory into another's.
+//
+// It exists instead of copyDirContents because that helper faithfully
+// recreates a symlink (os.Symlink of the same target), which is right for the
+// repository copies it was written for and wrong here. Evidence is written by
+// the live-evidence agent, so a link in that directory is agent-influenced
+// input; recreated here it would survive into a directory the pipeline
+// PUBLISHES, and the media upload reads artifact files by path, so a link to
+// any readable host file would put that file's contents in a public pull
+// request. The same argument rules out other irregular entries: a device or
+// fifo has no place in evidence and a reader could block on one.
+//
+// Skipping rather than failing is deliberate: an unexpected entry must not
+// cost a legitimate carry its real screenshots, and anything skipped simply
+// has no file behind it, which rebaseArtifactPath then declines to cite.
+func copyEvidenceFiles(srcDir, dstDir string) error {
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		srcPath := filepath.Join(srcDir, entry.Name())
+		dstPath := filepath.Join(dstDir, entry.Name())
+		info, err := os.Lstat(srcPath)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			continue
+		case info.IsDir():
+			if err := os.MkdirAll(dstPath, 0o700); err != nil {
+				return err
+			}
+			if err := copyEvidenceFiles(srcPath, dstPath); err != nil {
+				return err
+			}
+			if err := os.Chmod(dstPath, info.Mode().Perm()); err != nil {
+				return err
+			}
+		case info.Mode().IsRegular():
+			if err := copyFile(srcPath, dstPath, info.Mode().Perm()); err != nil {
+				return err
+			}
+		default:
+			continue
+		}
+	}
+	return nil
 }
 
 // anyFileBackedArtifact reports whether any artifact names a local file, which
@@ -423,7 +475,7 @@ func rebaseCarriedArtifacts(artifacts []types.TestArtifact, dest string) ([]type
 // already relative to the evidence directory, so it only needs confirming.
 func rebaseArtifactPath(recorded, evidenceRoot, dest string) (string, bool) {
 	if !filepath.IsAbs(recorded) {
-		if _, err := os.Stat(filepath.Join(dest, recorded)); err != nil {
+		if !regularFileAt(filepath.Join(dest, recorded)) {
 			return "", false
 		}
 		return recorded, true
@@ -439,10 +491,20 @@ func rebaseArtifactPath(recorded, evidenceRoot, dest string) (string, bool) {
 		return "", false
 	}
 	rebased := filepath.Join(dest, filepath.Join(segments[1:]...))
-	if _, err := os.Stat(rebased); err != nil {
+	if !regularFileAt(rebased) {
 		return "", false
 	}
 	return rebased, true
+}
+
+// regularFileAt reports whether path is a real file rather than a link,
+// directory, or device. os.Stat would FOLLOW a link and report on its target,
+// so an artifact pointing through one would read as backed and be published;
+// copyEvidenceFiles already declines to carry links, and this is the second
+// gate on citing one.
+func regularFileAt(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // gatedTestOutcome builds the step outcome for a run whose live-evidence agent

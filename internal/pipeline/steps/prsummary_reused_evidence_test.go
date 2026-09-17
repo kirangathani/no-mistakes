@@ -379,3 +379,85 @@ func TestCarryOriginEvidenceFailureModes(t *testing.T) {
 		t.Error("a run with no evidence directory must be an error")
 	}
 }
+
+// Evidence is written by the live-evidence agent, so a link in an evidence
+// directory is agent-influenced input. copyDirContents faithfully recreates a
+// symlink, which would land it in a directory the pipeline publishes - and the
+// media upload reads artifact files by path, so a link to any readable host
+// file would put that file's contents in a public pull request. Nothing
+// irregular is carried, and nothing irregular is cited.
+func TestCarryOriginEvidenceDoesNotCarrySymlinks(t *testing.T) {
+	host := t.TempDir()
+	evidenceRoot := filepath.Join(host, "evidence")
+	origin := filepath.Join(evidenceRoot, "run-1")
+	dest := filepath.Join(evidenceRoot, "run-2")
+	for _, dir := range []string{origin, dest} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secret := filepath.Join(host, "id_rsa")
+	if err := os.WriteFile(secret, []byte("PRIVATE KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A real screenshot beside a link masquerading as one.
+	if err := os.WriteFile(filepath.Join(origin, "checkout.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(origin, "leak.png")); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	sctx := &pipeline.StepContext{EvidenceDir: dest}
+
+	carried, err := carryOriginEvidence(sctx, "run-1", []types.TestArtifact{
+		{Label: "real screenshot", Path: filepath.Join(origin, "checkout.png")},
+		{Label: "a link pretending to be evidence", Path: filepath.Join(origin, "leak.png")},
+	})
+	if err != nil {
+		t.Fatalf("a legitimate artifact beside a link must still carry: %v", err)
+	}
+
+	// The link is not reproduced in the published directory at all.
+	if _, err := os.Lstat(filepath.Join(dest, "leak.png")); err == nil {
+		t.Error("the symlink was recreated inside this run's evidence directory")
+	}
+	if _, err := os.Stat(filepath.Join(dest, "id_rsa")); err == nil {
+		t.Error("the link's target was copied into this run's evidence directory")
+	}
+	// And it is never cited, while the real screenshot is.
+	for _, a := range carried {
+		if strings.Contains(a.Path, "leak.png") {
+			t.Errorf("a link was published as an artifact: %+v", a)
+		}
+	}
+	if len(carried) != 1 || filepath.Base(carried[0].Path) != "checkout.png" {
+		t.Fatalf("carried = %+v, want only the real screenshot", carried)
+	}
+}
+
+// regularFileAt is the second gate: os.Stat follows a link and would report on
+// its target, so an artifact pointing through one would read as backed.
+func TestRegularFileAtRefusesEverythingButARealFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "real.png")
+	if err := os.WriteFile(file, []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.png")
+	if err := os.Symlink(file, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	if !regularFileAt(file) {
+		t.Error("a real file must be accepted")
+	}
+	if regularFileAt(link) {
+		t.Error("a symlink must be refused even though its target exists")
+	}
+	if regularFileAt(dir) {
+		t.Error("a directory must be refused")
+	}
+	if regularFileAt(filepath.Join(dir, "absent.png")) {
+		t.Error("a missing path must be refused")
+	}
+}
