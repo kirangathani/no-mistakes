@@ -270,9 +270,6 @@ func recordAnsweredQuestions(sctx *pipeline.StepContext, conv reviewqa.Conversat
 	}
 }
 
-// reviewQuestionFindingID is the stable finding ID for a question, so the same
-// question keeps the same handle across rounds and an operator answering it
-// never has to guess which finding is which.
 // Bounds on what the open questions may put on a channel that is not theirs.
 //
 // The findings payload rides the IPC event stream, and one frame over the
@@ -311,6 +308,9 @@ func boundReviewQuestionText(s string, limit int) string {
 	return string(runes[:limit]) + fmt.Sprintf("… (truncated, %d chars total)", len(runes))
 }
 
+// reviewQuestionFindingID is the stable finding ID for a question, so the same
+// question keeps the same handle across rounds and an operator answering it
+// never has to guess which finding is which.
 func reviewQuestionFindingID(questionID string) string {
 	return "question-" + questionID
 }

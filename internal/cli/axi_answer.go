@@ -37,8 +37,10 @@ func newAxiAnswerCmd() *cobra.Command {
 		Use:   "answer",
 		Short: "Answer a question the reviewer asked while reviewing",
 		Long: "Records an answer to one question the run's reviewer asked. Questions\n" +
-			"appear in `no-mistakes axi status` under the review gate's\n" +
-			"review_questions, each with its id and its options.\n\n" +
+			"appear in `no-mistakes axi status` as the review gate's `question-<id>`\n" +
+			"findings, each carrying its id and the options the reviewer stated. When\n" +
+			"more questions are open than the gate renders as rows, the gate's\n" +
+			"omission notice names the remaining ids.\n\n" +
 			"This is not a gate response. The answer is appended to the run's review\n" +
 			"conversation immediately, so a reviewer that is still working reads it at\n" +
 			"its next checkpoint and can redirect the rest of its pass. Once no\n" +
@@ -59,7 +61,7 @@ func newAxiAnswerCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&questionID, "question", "", "question id as shown in the review gate's review_questions (required)")
+	cmd.Flags().StringVar(&questionID, "question", "", "question id, as carried by the review gate's `question-<id>` findings or named by the gate's omission notice (required)")
 	cmd.Flags().StringVar(&answer, "answer", "", "the answer, ideally one of the question's stated options (required)")
 	cmd.Flags().StringVar(&answeredBy, "by", "", "who answered, recorded on the PR and in the branch's settled questions")
 	return cmd

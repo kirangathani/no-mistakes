@@ -323,9 +323,12 @@ func Load(dir string) (Conversation, error) {
 		lines[q.ID] = append(lines[q.ID], q)
 		askOrder = append(askOrder, q.ID)
 		if entry, ok := byID[q.ID]; ok {
-			// A later question line for the same id is an edit, not a
-			// duplicate. It also revives a retracted question, because
-			// re-asking is how the reviewer says the retraction was wrong.
+			// A later question line for the same id supersedes the earlier
+			// one for THIS entry's state, and revives a retracted question,
+			// because re-asking is how the reviewer says the retraction was
+			// wrong. For settling it is a new ASK (counted above): it needs an
+			// answer stamped with its own ordinal and never inherits one
+			// written before it.
 			entry.Question = q
 			entry.Retracted = false
 			continue

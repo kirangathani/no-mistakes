@@ -90,7 +90,8 @@ and a per-adapter support matrix for a capability the agent already has.
 ```
 
 - `id` is the reviewer's own handle for the question. A later line with the same
-  `id` supersedes the earlier one, so a re-ask is an edit, not a duplicate.
+  `id` supersedes the earlier one for that question's state, and revives it if it
+  had been retracted - but it is a new **ask**, not an edit of the answered one.
 
   An `id` is chosen by the reviewer and is only unique by accident - every
   review turn of a run appends to the same file, and a cold rereview in a fix

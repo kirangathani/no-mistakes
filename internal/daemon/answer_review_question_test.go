@@ -429,8 +429,9 @@ func TestAnswerReviewQuestionCorrectionDoesNotPreAnswerAReAsk(t *testing.T) {
 // TestAnswerReviewQuestionRefusesWhenTheConversationCannotBeRead closes the one
 // path that still reproduced the defect the ask ordinal exists to close. The
 // stamp comes from the pre-append snapshot, so a conversation that could not be
-// read used to fall through and append an UNSTAMPED answer - which pairs
-// positionally, and so pre-answers the next re-ask of that id exactly as before.
+// read used to fall through and append an UNSTAMPED answer - and an unstamped
+// answer settles nothing at all, so the question it was meant for parks forever
+// while the operator is told it was recorded.
 //
 // The refusal must also name the read failure. "It answered no open question" is
 // the truthful report for a conversation that reads fine with nothing open, and
@@ -454,8 +455,8 @@ func TestAnswerReviewQuestionRefusesWhenTheConversationCannotBeRead(t *testing.T
 	if err == nil {
 		t.Fatalf("an unreadable conversation must refuse the answer, got %+v", result)
 	}
-	// The refusal is before the write, so no unstamped answer exists to pair
-	// positionally with a later re-ask.
+	// The refusal is before the write, so no unstamped answer that settles
+	// nothing was recorded.
 	if answers, readErr := os.ReadFile(filepath.Join(dir, reviewqa.AnswersFile)); !os.IsNotExist(readErr) {
 		t.Fatalf("an unstamped answer was recorded through the read failure: err=%v content=%q", readErr, answers)
 	}
