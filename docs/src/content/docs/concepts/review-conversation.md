@@ -144,7 +144,12 @@ The count the stamp is taken against is every accepted question line for that
 counts the leading lines its line bound discards rather than renumbering the
 survivors. Where the reader could not reach the end of `questions.ndjson` at all
 - its byte bound, or an unreadable line - a later ask of an `id` is unknowable,
-so nothing in that load is settled and every question stays open. A read that
+so nothing in that load is settled and every question stays open. The answer
+path refuses there rather than appending: an answer stamped against a history
+that is not all there could never close its question, so recording it would
+leave the gate parked forever with its operator told they had answered. The
+refusal names that cause, distinctly from a conversation that cannot be read at
+all, and writes nothing. A read that
 FAILS is not an empty conversation either: the review step stops, exactly as the
 answer path refuses, because a swallowed failure would complete a review with no
 open question rather than parking on the ones that were asked.

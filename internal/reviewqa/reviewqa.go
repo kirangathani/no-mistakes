@@ -154,6 +154,13 @@ type Conversation struct {
 	// does not, which is what lets the durable store keep both decisions when
 	// an id is re-asked.
 	Asks []Ask
+	// QuestionsIncomplete reports that the scan never reached the end of
+	// questions.ndjson, so a later ask of any id is unknowable and nothing in
+	// this load is settled. The reader fails toward OPEN on it; the WRITER
+	// refuses on it, because an answer stamped against a history that is not
+	// all there could never close its question and would park the gate
+	// forever with the operator told they had answered it.
+	QuestionsIncomplete bool
 }
 
 // SettledAsks returns every (question, answer) pair this conversation has
@@ -384,6 +391,7 @@ func Load(dir string) (Conversation, error) {
 		conv.Notes = append(conv.Notes, "review conversation file exceeded its size bound; older lines were not read")
 	}
 	if questionsIncomplete {
+		conv.QuestionsIncomplete = true
 		conv.Notes = append(conv.Notes, "questions.ndjson could not be read to the end; no answer settles a question until it can be")
 	}
 	return conv, nil

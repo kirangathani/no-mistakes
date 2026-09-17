@@ -1756,6 +1756,10 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 //
 // Every answer is stamped with the ask it settles, so a correction binds to the
 // already-settled ask instead of pre-answering a later re-ask of the same id.
+// The two ways that stamp cannot be trusted are refused before anything is
+// written, and they stay distinguishable from each other and from the third
+// outcome above: a conversation that cannot be READ AT ALL, and one whose
+// question history could not be read TO THE END.
 //
 // The write happens before the release decision, so a failure to resume never
 // loses the answer - the next answer, or a recovered gate, finds it on disk.
@@ -1810,6 +1814,19 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	before, err := reviewqa.Load(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read run %s's review conversation before recording the answer: %w", runID, err)
+	}
+	// A question history the reader could not reach the end of is refused for
+	// the same reason, and it is a DIFFERENT failure from the one above: the
+	// file opened and parsed, so nothing here errored, but a later ask of any
+	// id is past the seen region, so the load settles nothing and never will.
+	// Stamping an answer against it would record an answer that can never
+	// close its question, leaving the gate parked forever with the operator
+	// told they had answered it. Refusing before the append is what keeps this
+	// from becoming that silent strand - and it is not the ordinary case of an
+	// answer that closed nothing, which reads fine, stays recorded and is
+	// deliberately not an error.
+	if before.QuestionsIncomplete {
+		return nil, fmt.Errorf("run %s's review question history could not be read to the end (%s), so an answer cannot be bound to the ask it settles; nothing was recorded - read that file for the questions asked, and resolve the parked review with `no-mistakes axi respond` instead", runID, filepath.Join(dir, reviewqa.QuestionsFile))
 	}
 	wasOpen := false
 	askOrdinal := 0

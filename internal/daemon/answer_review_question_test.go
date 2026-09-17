@@ -467,3 +467,36 @@ func TestAnswerReviewQuestionRefusesWhenTheConversationCannotBeRead(t *testing.T
 		t.Fatalf("an unreadable conversation was reported as having nothing open: %v", err)
 	}
 }
+
+// TestAnswerReviewQuestionRefusesAnIncompleteQuestionHistory is the write-side
+// half of the rule the reader already applies: a questions.ndjson the scan
+// cannot reach the end of settles nothing, ever, so an answer stamped against
+// it could never close its question and the gate would park forever with the
+// operator told they had answered it. The refusal must name THAT cause rather
+// than the ordinary "no question was open", which is a different, non-error
+// outcome, and it must write nothing at all.
+func TestAnswerReviewQuestionRefusesAnIncompleteQuestionHistory(t *testing.T) {
+	m, p, runID := answerFixture(t)
+	dir := conversationDir(p, runID)
+	appendAgentQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
+	// Over the reader's per-line budget, so its scan stops here and whatever
+	// follows - including a later ask of q1 - is never seen.
+	appendAgentQuestionLine(t, dir, `{"id":"q2","kind":"question","question":"`+strings.Repeat("x", 64<<10)+`"}`)
+
+	result, err := m.HandleAnswerReviewQuestion(runID, "q1", "keep", "captain")
+	if err == nil {
+		t.Fatalf("answering against an incomplete question history must fail, got %+v", result)
+	}
+	if !strings.Contains(err.Error(), "could not be read to the end") {
+		t.Fatalf("refusal does not name the incompleteness: %v", err)
+	}
+	if strings.Contains(err.Error(), "no open question") {
+		t.Fatalf("refusal reads as the ordinary nothing-was-open case: %v", err)
+	}
+
+	if answers, readErr := os.ReadFile(filepath.Join(dir, reviewqa.AnswersFile)); readErr == nil {
+		t.Fatalf("a refused answer was written to disk: %s", answers)
+	} else if !os.IsNotExist(readErr) {
+		t.Fatalf("read answers file: %v", readErr)
+	}
+}
