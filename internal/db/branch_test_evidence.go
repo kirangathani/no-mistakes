@@ -21,13 +21,24 @@ type BranchTestEvidence struct {
 	Intent       string
 }
 
-// GetBranchTestEvidence returns the single most recently completed test step
-// of another run on the same repo and branch that still carries a findings
+// GetBranchTestEvidence returns the single most recently RECORDED test step of
+// another run on the same repo and branch that still carries a findings
 // payload, or nil when there is none.
+//
+// Recorded, not completed, and deliberately so: a step that recorded a verdict
+// and then parked, was aborted, or was skipped keeps its payload, and that
+// verdict is still this branch's latest evidence. Filtering to completed steps
+// would hide a no-go behind an older completed go, which is the exact
+// inversion the newest-verdict rule exists to prevent. Recency is therefore
+// taken from the row id - a ULID, so it sorts by creation time for a parked
+// and a completed row alike - rather than from completed_at, which is NULL on
+// a parked row and sorts last under DESC.
 //
 // Only the newest one is returned because only the newest one is evidence
 // about where this branch now stands: an older verdict that a later run has
-// already superseded must never outrank it.
+// already superseded must never outrank it. Every non-go outcome this now
+// exposes declines reuse at the caller, so the widening only ever fails
+// toward running the evidence agent.
 //
 // Branch scope is the whole point: a verdict is evidence about one branch's
 // head, so it is never visible to another branch. A fix round can clear a
@@ -41,12 +52,12 @@ func (d *DB) GetBranchTestEvidence(repoID, branch, excludeRunID string) (*Branch
 		   FROM step_results res
 		   JOIN runs r ON r.id = res.run_id
 		  WHERE r.repo_id = ? AND r.branch = ? AND r.id != ?
-		    AND res.step_name = ? AND res.status = ?
+		    AND res.step_name = ?
 		    AND res.findings_json IS NOT NULL
-		  ORDER BY res.completed_at DESC, res.id DESC
+		  ORDER BY res.id DESC
 		  LIMIT 1`,
 		repoID, branch, excludeRunID,
-		string(types.StepTest), string(types.StepStatusCompleted),
+		string(types.StepTest),
 	).Scan(&entry.RunID, &entry.FindingsJSON, &intent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
