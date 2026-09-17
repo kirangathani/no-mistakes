@@ -574,6 +574,70 @@ func TestExecutor_ReviewCarryForward_PositiveCoverageClearsFinding(t *testing.T)
 	}
 }
 
+// TestExecutor_ReviewCarryForward_AnOpenQuestionDoesNotBlockVerification pins
+// the boundary between the two mechanisms. A review question is not a report
+// about the code, so it must not take part in verification: a question's file
+// is optional and the omission marker never has one, so leaving questions in
+// the verification input made hasUnanchoredFinding true and refused to clear
+// EVERY selected finding for as long as any question stayed open.
+func TestExecutor_ReviewCarryForward_AnOpenQuestionDoesNotBlockVerification(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			round++
+			if round == 1 {
+				return &StepOutcome{
+					NeedsApproval:   true,
+					Findings:        `{"findings":[{"id":"review-1","severity":"error","file":"service.go","line":10,"description":"nil deref","action":"ask-user"}],"summary":"1 finding"}`,
+					ReviewedPaths:   []string{"service.go"},
+					ReviewablePaths: []string{"service.go"},
+				}, nil
+			}
+			// The fix is verified - service.go was reviewed and reports
+			// nothing - while an unanswered question rides along, exactly as
+			// ReviewStep.Execute appends one to its own output.
+			return &StepOutcome{
+				NeedsApproval:   true,
+				Findings:        `{"findings":[{"id":"question-q1","severity":"warning","description":"Review question awaiting an answer: keep the legacy route?","action":"ask-user","category":"review-question"}],"summary":"one open question"}`,
+				ReviewedPaths:   []string{"service.go"},
+				ReviewablePaths: []string{"service.go"},
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].FindingsJSON == nil {
+		t.Fatal("the gate carries no findings at all, so the open question was lost")
+	}
+	if strings.Contains(*steps[0].FindingsJSON, `"review-1"`) {
+		t.Fatalf("the verified finding stayed outstanding because a question was open: %s", *steps[0].FindingsJSON)
+	}
+	if !strings.Contains(*steps[0].FindingsJSON, "question-q1") {
+		t.Fatalf("the open question is missing from the gate: %s", *steps[0].FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
+
 // TestResolveVerifiedFindingsJSON pins the verify-before-clear rule: only a
 // positive coverage record that also stops reporting the defect clears a
 // selected finding. Silence, a round that looked elsewhere, a re-reported

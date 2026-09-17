@@ -1130,8 +1130,20 @@ rounds:
 			// A review question is resolved by its answer, not by a coverage
 			// record, so it never joins the append-only carry-forward; this
 			// round's own output re-emits every question still open.
+			//
+			// It is dropped from the VERIFICATION INPUT for the same reason and
+			// one more: resolveVerifiedFindingsJSON reads this round's findings
+			// to decide what the round did and did not still report, and a
+			// question is neither. A question's file is optional and the
+			// omission marker never has one, so leaving them in makes
+			// hasUnanchoredFinding true and refuses to clear ANY selected
+			// finding while a question is open; a question that does carry a
+			// file instead poisons that path in reportedFiles. Either way an
+			// answered-and-verified finding would stay outstanding for a reason
+			// that has nothing to do with it.
+			verificationFindings := dropReviewQuestionFindingsJSON(roundFindings)
 			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
-			outstandingFindings = resolveVerifiedFindingsJSON(outstandingFindings, pendingVerificationIDs, outcome.ReviewedPaths, outcome.ReviewablePaths, roundFindings)
+			outstandingFindings = resolveVerifiedFindingsJSON(outstandingFindings, pendingVerificationIDs, outcome.ReviewedPaths, outcome.ReviewablePaths, verificationFindings)
 			pendingVerificationIDs = retainFindingIDs(outstandingFindings, pendingVerificationIDs)
 			selectedOutstandingIDs = retainFindingIDs(outstandingFindings, selectedOutstandingIDs)
 			effectiveFindings = mergeOutstandingFindingsJSON(outstandingFindings, roundFindings, outcome.ReviewedPaths)
