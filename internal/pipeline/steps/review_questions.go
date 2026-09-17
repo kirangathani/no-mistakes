@@ -335,6 +335,30 @@ func reviewQuestionFindingID(questionID string) string {
 func openReviewQuestionFindings(conv reviewqa.Conversation) []types.Finding {
 	open := conv.Open()
 	if len(open) == 0 {
+		// An unreadable question history has to park on its own account. The
+		// reader refusing to settle anything is not enough: if the only real
+		// question is in the prefix the line cap dropped, and every line that
+		// survived is one the reader rejects - a minor-weight spew, malformed
+		// lines, retractions for unknown ids - then nothing is open, no
+		// question finding is emitted, the omission marker is not emitted
+		// either because its id list comes from the open set, and the review
+		// completes clean with a major question silently discarded. That is
+		// the failure this whole channel exists to prevent, reached through a
+		// door the settle rule does not cover.
+		//
+		// Category deliberately NOT review-question: that category tells every
+		// automatic resolver to stand aside and wait for an answer, and the
+		// daemon refuses answers precisely while the history is unreadable, so
+		// it would park a gate no one could release. This is an ordinary
+		// ask-user warning, which a human can approve, fix or skip.
+		if conv.QuestionsIncomplete {
+			return []types.Finding{{
+				ID:          "review-questions-unreadable",
+				Severity:    types.FindingSeverityWarning,
+				Description: "The reviewer's question history could not be read in full, so a question it asked may have been dropped before this gate could show it. Answers are refused while that is true, because an answer cannot be bound to the ask it settles. Decide this gate yourself: the run's questions.ndjson holds whatever was written.",
+				Action:      types.ActionAskUser,
+			}}
+		}
 		return nil
 	}
 	var omittedIDs []string

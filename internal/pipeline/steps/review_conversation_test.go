@@ -855,6 +855,46 @@ func TestReviewStep_ConversationOffIgnoresQuestionsAlreadyOnDisk(t *testing.T) {
 	}
 }
 
+// TestUnreadableQuestionHistoryParksEvenWithNothingOpen covers the door the
+// settle rule does not close. The reader refusing to settle anything keeps an
+// answer from certifying a question it cannot bind, but it does not make the
+// step park - and if the only real question is in the prefix the line cap
+// dropped while every surviving line is one the reader rejects, nothing is
+// open, no question finding is emitted, the omission marker is not emitted
+// either (its id list comes from the open set), and the review completes clean
+// with a major question silently discarded.
+func TestUnreadableQuestionHistoryParksEvenWithNothingOpen(t *testing.T) {
+	conv := reviewqa.Conversation{QuestionsIncomplete: true}
+	if len(conv.Open()) != 0 {
+		t.Fatal("fixture is meant to have nothing open")
+	}
+
+	findings := openReviewQuestionFindings(conv)
+
+	if len(findings) != 1 {
+		t.Fatalf("an unreadable question history emitted %d findings, want one that parks the gate", len(findings))
+	}
+	got := findings[0]
+	if got.Action != types.ActionAskUser {
+		t.Fatalf("finding action = %q, want ask-user so the gate parks: %+v", got.Action, got)
+	}
+	// Not the review-question category: that tells every automatic resolver to
+	// stand aside and wait for an answer, and the daemon refuses answers while
+	// the history is unreadable - which would park a gate nobody could
+	// release.
+	if got.Category == types.FindingCategoryReviewQuestion {
+		t.Fatalf("an unreadable history parked as a review question, so it needs an answer the daemon refuses: %+v", got)
+	}
+	if strings.HasPrefix(got.ID, "question-") {
+		t.Fatalf("finding %q reads as an answerable question row", got.ID)
+	}
+
+	// A readable conversation with nothing open still emits nothing.
+	if rest := openReviewQuestionFindings(reviewqa.Conversation{}); rest != nil {
+		t.Fatalf("a readable, empty conversation emitted %+v", rest)
+	}
+}
+
 // TestOpenReviewQuestionFindingsAreBounded covers the channel the questions
 // borrow rather than own. The findings payload rides the IPC event stream, and
 // one frame over the transport limit kills the whole subscription - so an
