@@ -972,6 +972,23 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	if carryFindings {
 		outstandingFindings = state.outstandingFindings
 		pendingVerificationIDs = append([]string(nil), state.selectedOutstandingIDs...)
+		if state.answering {
+			// An answer round is a round type the append-only set was not
+			// written for. A fix round earns its pending-verification entries
+			// when a selection is DISPATCHED to the fixer; an answer dispatches
+			// nothing, so without this the finalize turn's coverage record can
+			// certify nothing and a finding the answer itself disproved is
+			// re-injected verbatim - still carrying its "PENDING ANSWER (<id>)"
+			// prefix, still pointing the operator at a question that is now
+			// settled, and removable only by approving over it.
+			//
+			// So the carried set is what this round may verify. The rule itself
+			// is untouched: a finding still leaves only on a positive coverage
+			// record that also stops reporting it. This only admits that the
+			// finalize turn, which re-reads the same head with the answers in
+			// hand, is a rereview of what it carried in.
+			pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(outstandingFindings))
+		}
 	}
 
 	stepAgent := e.agent
@@ -1415,6 +1432,18 @@ rounds:
 					slog.Warn("failed to return step status to running", "step", stepName, "error", dbErr)
 				}
 				sctx.FinalizingAnswers = true
+				// What this round may verify is what it carries in. A fix round
+				// earns its pending-verification entries when a selection is
+				// dispatched to the fixer; an answer dispatches nothing, so
+				// without this the finalize turn's coverage record certifies
+				// nothing and a finding the answer itself disproved is
+				// re-injected verbatim - still carrying its "PENDING ANSWER
+				// (<id>)" prefix and pointing at a settled question. The
+				// verification rule is unchanged: a finding still leaves only
+				// on a positive coverage record that also stops reporting it.
+				if carryFindings {
+					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(outstandingFindings))
+				}
 				// A question can be asked by a rereview inside a fix round too.
 				// That round's fixes are already applied and committed, so the
 				// re-execution must replay its REVIEW turn only; running the
