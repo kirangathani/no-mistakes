@@ -386,17 +386,20 @@ Risk assessment (after listing all findings):
 	// the step re-parked on the same question forever, because a fix round's
 	// rereview is deliberately session-free.
 	if sctx.FinalizingAnswers && convDir != "" {
-		conv, err := loadReviewConversation(sctx, convDir)
-		if err != nil {
-			return nil, err
-		}
-		if answers := reviewAnswersPromptSection(conv); answers != "" {
+		// Reuses the load the prompt was built from rather than reading the two
+		// files again: no agent turn has run in between, so a second read can
+		// only return the same conversation, and loadReviewConversation logs
+		// every protocol note it finds - so re-reading also repeats each note
+		// in the operator's step log. The post-turn load further down is a
+		// different matter and stays: the turn itself may have written to the
+		// conversation.
+		if answers := reviewAnswersPromptSection(asked); answers != "" {
 			turnPrompt = prompt + answers
 			how := "resuming"
 			if !resumingAnswers {
 				how = "replaying"
 			}
-			sctx.Log(fmt.Sprintf("%s the review with %d answered question(s)", how, len(conv.Answered())))
+			sctx.Log(fmt.Sprintf("%s the review with %d answered question(s)", how, len(asked.Answered())))
 		}
 	}
 	opts := agent.RunOpts{
