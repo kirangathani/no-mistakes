@@ -163,9 +163,37 @@ func recordPriorVerdict(t *testing.T, sctx *pipeline.StepContext, headSHA, verdi
 	return recordPriorVerdictWithIntent(t, sctx, headSHA, verdict, gateTestIntent)
 }
 
+// recordParkedPriorVerdict records a verdict on another run of this branch
+// whose Test step then PARKED rather than completing, which is what every
+// blocking verdict does and what a daemon crash, an abort, or a skip leaves
+// behind. The payload survives all of those, so the verdict is still this
+// branch's latest evidence and must still be the one reuse consults.
+func recordParkedPriorVerdict(t *testing.T, sctx *pipeline.StepContext, headSHA, verdict string) string {
+	t.Helper()
+	return recordPriorVerdictSettled(t, sctx, headSHA, verdict, gateTestIntent, func(runID, stepID, payload string) {
+		if err := sctx.DB.ParkStepForApproval(runID, stepID, types.StepStatusAwaitingApproval, 0, 1, &payload); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 // recordPriorVerdictWithIntent additionally chooses the intent that prior run
 // was validated under; an empty one leaves it with none.
 func recordPriorVerdictWithIntent(t *testing.T, sctx *pipeline.StepContext, headSHA, verdict, intent string) string {
+	t.Helper()
+	return recordPriorVerdictSettled(t, sctx, headSHA, verdict, intent, func(_, stepID, payload string) {
+		if err := sctx.DB.SetStepFindings(stepID, payload); err != nil {
+			t.Fatal(err)
+		}
+		if err := sctx.DB.CompleteStep(stepID, 0, 1, ""); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// recordPriorVerdictSettled builds the prior run and its recorded payload, and
+// leaves how that step ended to the caller.
+func recordPriorVerdictSettled(t *testing.T, sctx *pipeline.StepContext, headSHA, verdict, intent string, settle func(runID, stepID, payload string)) string {
 	t.Helper()
 	run, err := sctx.DB.InsertRun(sctx.Run.RepoID, sctx.Run.Branch, headSHA, sctx.Run.BaseSHA)
 	if err != nil {
@@ -199,13 +227,41 @@ func recordPriorVerdictWithIntent(t *testing.T, sctx *pipeline.StepContext, head
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sctx.DB.SetStepFindings(step.ID, string(raw)); err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.CompleteStep(step.ID, 0, 1, ""); err != nil {
-		t.Fatal(err)
-	}
+	settle(run.ID, step.ID, string(raw))
 	return run.ID
+}
+
+// TestTestStep_ParkedNoGoBlocksReuseOfAnOlderGo: the newest RECORDED verdict
+// is what reuse consults, and a blocking verdict's own step never completes -
+// it parks for a human, and a daemon restart, an abort, or a skip all leave it
+// non-completed with its payload intact. Consulting only completed steps would
+// therefore hide exactly the verdict that must block, and republish an older
+// go over a live turn that said no-go at the same product state.
+func TestTestStep_ParkedNoGoBlocksReuseOfAnOlderGo(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := stepstest.SetupGitRepo(t)
+	validated := commitFiles(t, dir, "product change", map[string]string{
+		"internal/checkout/checkout.go": "package checkout\n",
+	})
+	head := commitFiles(t, dir, "docs follow-up", map[string]string{"docs/guide.md": "# guide\n"})
+	ag := gateAgent()
+	sctx := gateContext(t, ag, dir, baseSHA, head)
+
+	// Both name the head the go verdict validated, so no product file moved
+	// since it was earned and only the verdict ordering can decline reuse.
+	recordPriorGoVerdict(t, sctx, validated)
+	recordParkedPriorVerdict(t, sctx, validated, types.TestVerdictNoGo)
+
+	outcome, err := (&steps.TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.Calls) != 1 {
+		t.Fatalf("evidence agent invocations = %d, want 1 (a parked no-go is still this branch's newest verdict)", len(ag.Calls))
+	}
+	if got := parseOutcomeFindings(t, outcome).EvidenceSource; got != types.TestEvidenceSourceAgent {
+		t.Fatalf("evidence source = %q, want %q", got, types.TestEvidenceSourceAgent)
+	}
 }
 
 // TestTestStep_AgentCannotSeedTheEvidenceOriginRunID: evidence_origin_run_id
