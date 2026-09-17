@@ -580,6 +580,48 @@ func TestTestStep_ReusesAGoVerdictWhenProductFilesAreUnchanged(t *testing.T) {
 	}
 }
 
+// TestTestStep_ReusesAGoVerdictRecordedAtThisRunsOwnHead covers the reuse with
+// no new commits at all - a re-run of the branch at the same commit, which is
+// the decision-only re-run the gate exists for and the shape production hits
+// most often. It has no short-circuit of its own: the general path diffs the
+// prior verdict's head against this one, git reports a commit against itself
+// as empty, and the reuse is granted through the same acceptance point every
+// other case uses.
+func TestTestStep_ReusesAGoVerdictRecordedAtThisRunsOwnHead(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := stepstest.SetupGitRepo(t)
+	head := commitFiles(t, dir, "product change", map[string]string{
+		"internal/checkout/checkout.go": "package checkout\n",
+	})
+	ag := gateAgent()
+	sctx := gateContext(t, ag, dir, baseSHA, head)
+	priorRunID := recordPriorGoVerdict(t, sctx, head)
+
+	outcome, err := (&steps.TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.Calls) != 0 {
+		t.Fatalf("evidence agent invocations = %d, want 0 (nothing moved since the verdict was earned)", len(ag.Calls))
+	}
+	if outcome.NeedsApproval {
+		t.Fatal("a reused go verdict must not park the step")
+	}
+	findings := parseOutcomeFindings(t, outcome)
+	if findings.Verdict != types.TestVerdictGo {
+		t.Fatalf("verdict = %q, want %q", findings.Verdict, types.TestVerdictGo)
+	}
+	if findings.EvidenceSource != types.TestEvidenceSourceReused {
+		t.Fatalf("evidence source = %q, want %q", findings.EvidenceSource, types.TestEvidenceSourceReused)
+	}
+	if !strings.Contains(findings.EvidenceReason, "reused from run "+priorRunID) {
+		t.Fatalf("evidence reason %q does not name the run that drove the scenarios", findings.EvidenceReason)
+	}
+	if findings.TestedHeadSHA != head {
+		t.Fatalf("tested head = %q, want the head the scenarios were driven at %q", findings.TestedHeadSHA, head)
+	}
+}
+
 // TestTestStep_IntentChangeDefeatsReuse: the evidence turn derives its
 // scenarios from the run's user intent, and an --intent supplied one is
 // authoritative acceptance criteria. A refined intent at a byte-identical
