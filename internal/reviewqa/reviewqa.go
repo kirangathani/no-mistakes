@@ -254,6 +254,25 @@ func Load(dir string) (Conversation, error) {
 	}
 
 	questionLines, droppedQuestionLines, questionsIncomplete, err := readLines(filepath.Join(dir, QuestionsFile))
+	// Both read bounds have to fail the same way, and they did not. The byte
+	// bound stops the scan, so the tail is unseen and nothing settles. The line
+	// cap instead KEEPS the newest lines and drops a prefix - and Entries are
+	// built from the retained lines only, so a question whose only line is in
+	// that prefix has no Entry at all: it is missing from Open(), no
+	// "question-<id>" finding is emitted for it, and it is absent from the
+	// omission marker's id list too, because that list is built from Open().
+	// Both release paths would then see nothing open and release the gate with
+	// a major question unanswered, with a later answer for it recorded as an
+	// orphan. Reaching it needs more than maxLines accepted question lines in
+	// one run, which is exactly the runaway-appending reviewer the bound exists
+	// for.
+	//
+	// So a dropped question line is an incomplete question history too, and
+	// from here on the two are one condition. A dropped ANSWER line is not the
+	// same and deliberately does not set it: an answer that scrolled out of the
+	// window cannot settle anything either way, and the ask it belonged to
+	// simply stays open, which is the safe direction.
+	questionsIncomplete = questionsIncomplete || len(droppedQuestionLines) > 0
 	if err != nil {
 		return conv, err
 	}
@@ -392,7 +411,7 @@ func Load(dir string) (Conversation, error) {
 	}
 	if questionsIncomplete {
 		conv.QuestionsIncomplete = true
-		conv.Notes = append(conv.Notes, "questions.ndjson could not be read to the end; no answer settles a question until it can be")
+		conv.Notes = append(conv.Notes, "questions.ndjson could not be read in full; no answer settles a question until it can be")
 	}
 	return conv, nil
 }

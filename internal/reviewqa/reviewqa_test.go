@@ -619,13 +619,24 @@ func TestAskOrdinalsSurviveTheLineCap(t *testing.T) {
 	if q1.Question.Question != "second ask" {
 		t.Fatalf("q1 = %q, want the retained second ask", q1.Question.Question)
 	}
-	if !q1.Answered() {
-		t.Fatalf("the answer stamped for ask 2 did not settle it: %+v", q1)
-	}
+	// The ordinal is the subject: numbering the survivors from 1 would call
+	// this retained re-ask ask 1, and the answer stamped for ask 2 at append
+	// time would then name a question that no longer exists.
 	for _, a := range conv.Asks {
 		if a.Question.ID == "q1" && a.Ordinal != 2 {
 			t.Fatalf("retained ask of q1 numbered %d, want 2", a.Ordinal)
 		}
+	}
+	// Settling is suppressed while question lines are missing, which is a
+	// separate rule from the ordinal one and the reason this file's two read
+	// bounds now agree: the dropped prefix may hold an OPEN question that has
+	// no Entry here at all, so nothing in this conversation may be reported as
+	// settled until the history can be read in full.
+	if !conv.QuestionsIncomplete {
+		t.Fatal("the line cap dropped question lines but the history reads as complete")
+	}
+	if q1.Answered() {
+		t.Fatalf("an incomplete question history settled an ask: %+v", q1)
 	}
 }
 
@@ -653,7 +664,41 @@ func TestLoadSettlesNothingWhenTheQuestionFileWasNotReadToTheEnd(t *testing.T) {
 	if len(conv.SettledAsks()) != 0 {
 		t.Fatalf("a short scan settled %d ask(s)", len(conv.SettledAsks()))
 	}
-	if !strings.Contains(strings.Join(conv.Notes, "\n"), "could not be read to the end") {
+	if !strings.Contains(strings.Join(conv.Notes, "\n"), "could not be read in full") {
 		t.Fatalf("short scan not disclosed: %v", conv.Notes)
+	}
+}
+
+// TestLoadSettlesNothingWhenTheLineCapDroppedAQuestion is the line bound's half
+// of the same rule. The byte bound stops the scan, so the tail is unseen; the
+// line cap keeps the NEWEST lines and drops a prefix, and Entries are built
+// only from what is retained - so a question whose only line is in that prefix
+// has no Entry, is missing from Open(), is never emitted as a finding, and is
+// absent from the omission marker's id list too, because that list comes from
+// Open(). Both release paths would then see nothing open and release the gate
+// with a major question unanswered.
+func TestLoadSettlesNothingWhenTheLineCapDroppedAQuestion(t *testing.T) {
+	dir := t.TempDir()
+	var lines []string
+	// The first question is pushed out of the retention window by the rest.
+	lines = append(lines, `{"id":"q-oldest","kind":"question","question":"was the legacy route meant to go?","weight":"major"}`)
+	for i := 0; i < maxLines; i++ {
+		lines = append(lines, fmt.Sprintf(`{"id":"q%d","kind":"question","question":"later question %d","weight":"major"}`, i, i))
+	}
+	write(t, dir, QuestionsFile, lines...)
+	write(t, dir, AnswersFile, `{"id":"q0","answer":"yes","ask_ordinal":1}`)
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !conv.QuestionsIncomplete {
+		t.Fatal("a question line dropped by the line cap left the history looking complete, so an answer could settle a question and release the gate with a dropped question still open")
+	}
+	if len(conv.SettledAsks()) != 0 {
+		t.Fatalf("an incomplete question history settled %d ask(s)", len(conv.SettledAsks()))
+	}
+	if !strings.Contains(strings.Join(conv.Notes, "\n"), "could not be read in full") {
+		t.Fatalf("the dropped question was not disclosed: %v", conv.Notes)
 	}
 }

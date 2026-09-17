@@ -142,9 +142,25 @@ the first ask or answers the re-ask, and that ambiguity is the whole defect.
 The count the stamp is taken against is every accepted question line for that
 `id` in the file, so which lines the reader retains never shifts it: the reader
 counts the leading lines its line bound discards rather than renumbering the
-survivors. Where the reader could not reach the end of `questions.ndjson` at all
-- its byte bound, or an unreadable line - a later ask of an `id` is unknowable,
-so nothing in that load is settled and every question stays open. The answer
+survivors.
+
+Both of the reader's bounds then fail the same way, and this is the rule that
+matters most in the file: if `questions.ndjson` could not be read IN FULL,
+nothing in that load settles and every question stays open. The byte bound and
+an unreadable line stop the scan, so a later ask of an `id` is unknowable. The
+line bound drops a leading prefix instead, and that is no safer: entries are
+built from the retained lines, so a question whose only line is in the dropped
+prefix has no entry at all - it is missing from the open set, no finding is
+emitted for it, and it is absent even from the omission notice's id list,
+because that list is built from the open set. Treated as complete, such a load
+would report nothing open and release the gate with a major question
+unanswered, with a later answer for it recorded as an orphan. Reaching it takes
+more than 2000 accepted question lines in one run, which is precisely the
+runaway-appending reviewer the bound exists for.
+
+A dropped ANSWER line is deliberately not the same: an answer that scrolled out
+of the window cannot settle anything either way, and the ask it belonged to
+simply stays open, which is the safe direction. The answer
 path refuses there rather than appending: an answer stamped against a history
 that is not all there could never close its question, so recording it would
 leave the gate parked forever with its operator told they had answered. The
