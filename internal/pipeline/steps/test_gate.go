@@ -125,8 +125,11 @@ func resolveTestEvidenceGate(sctx *pipeline.StepContext, baseSHA string, baselin
 
 // changedProductPaths returns the changed paths this repository counts as
 // product or UI files. In fix mode the comparison is against the working tree,
-// matching how the review step reads its own changed set, because the fixer's
-// edits are not committed to Run.HeadSHA yet.
+// matching how the review step reads its own changed set. commitAgentFixes has
+// already committed and advanced Run.HeadSHA by this point, so the two forms
+// normally agree; comparing against the tree additionally counts anything the
+// fix turn or the configured test command left modified in it, which only ever
+// fails open to running the agent.
 func changedProductPaths(sctx *pipeline.StepContext, baseSHA string, nonProduct []string) ([]string, error) {
 	rangeArg := baseSHA + ".." + sctx.Run.HeadSHA
 	if sctx.Fixing {

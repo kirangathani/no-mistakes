@@ -878,7 +878,9 @@ type TestRaw struct {
 	// "diff-class": the turn runs only when the run's diff touches a product
 	// file per NonProductPaths AND this branch's newest recorded verdict is
 	// not a go earned, under the same run intent, at a product state this head
-	// still matches. A failing commands.test baseline also forces the turn.
+	// still matches. A failing commands.test baseline defeats reuse and forces
+	// the turn, but does not override the no-product-file conclusion, which is
+	// a fact about the diff.
 	//
 	// The turn is the pipeline's single most expensive act - a measured ~21
 	// minutes and ~19M tokens per run, 38% of all pipeline tokens - and a
