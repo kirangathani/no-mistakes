@@ -183,16 +183,21 @@ Previous review findings to address:
 	}
 	changed := changedPathList(changedFiles)
 
-	if len(reviewablePaths(changed, sctx.Config.IgnorePatterns)) == 0 {
+	reviewable := reviewablePaths(changed, sctx.Config.IgnorePatterns)
+	if len(reviewable) == 0 {
 		sctx.Log("no changes to review")
 		noChangeFindings := Findings{
 			RiskLevel:     "low",
 			RiskRationale: "no reviewable changes",
 		}
+		// Nothing changed, so nothing needed covering; an empty coverage record
+		// is honest here and cannot clear any outstanding finding.
+		noChangeFindings.ReviewedPaths = nil
 		findingsJSON, _ := json.Marshal(noChangeFindings)
 		return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-			Findings:   string(findingsJSON),
-			FixSummary: fixSummary,
+			Findings:        string(findingsJSON),
+			ReviewablePaths: reviewable,
+			FixSummary:      fixSummary,
 		})
 	}
 
@@ -302,6 +307,7 @@ Task:
 - "Simplification" opportunities in this pass mean reducing code complexity through non-functional refactoring (e.g. deduplication, clearer control flow). They do NOT mean removing features, changing product behavior, or stripping intentional user-facing output; a component the intent does not require is reported through the dedicated Simplification section below, never as an "auto-fix" refactor.
 - Treat security issues, performance regressions, breaking changes, insufficient error handling, and a computation that returns a wrong value, label, or set without failing as risks.
 - Do a full review pass before returning. Do not stop after the first valid finding. Continue inspecting the rest of the changed code until you have enumerated all material issues you can substantiate.
+- Report reviewed_paths as the exact set of changed files you actually read and judged in this pass. It is a coverage record, not a summary: list a changed file only if your findings verdict for it is current, and never list a file you did not examine. A file you omit is treated as unreviewed by the pipeline, never as clean.
 
 Rules:
 - Anchor every finding to a specific file and one-indexed line number in the changed code when possible.
@@ -447,13 +453,26 @@ Risk assessment (after listing all findings):
 	}
 
 	needsApproval := hasBlockingFindings(findings.Items)
+	if !needsApproval && !reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable) {
+		// A clean round certifies the whole head, so it is held to a positive
+		// coverage record over every trusted reviewable path. An omitted
+		// reviewed_paths is not a legacy pass: the field is optional in the
+		// schema only so an older payload still parses, and an absent list is
+		// the same missing evidence as an empty or partial one (VISION.md R4:
+		// every review pass covers the complete change). The head parks for
+		// approval instead, and the log names what was left unverified.
+		sctx.Log(uncoveredReviewMessage(findings.ReviewedPaths, reviewable))
+		needsApproval = true
+	}
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-		NeedsApproval: needsApproval,
-		AutoFixable:   len(findings.Items) > 0,
-		Findings:      string(findingsJSON),
-		FixSummary:    fixSummary,
+		NeedsApproval:   needsApproval,
+		AutoFixable:     len(findings.Items) > 0,
+		Findings:        string(findingsJSON),
+		ReviewedPaths:   findings.ReviewedPaths,
+		ReviewablePaths: reviewable,
+		FixSummary:      fixSummary,
 	})
 }
 
