@@ -321,6 +321,12 @@ func carryOriginEvidence(sctx *pipeline.StepContext, originRunID string, artifac
 	if dest == "" {
 		return nil, errors.New("this run has no evidence directory")
 	}
+	// A verdict evidenced only by url or content artifacts has no file to
+	// copy, and demanding a populated originating directory would then throw
+	// its scenarios away for nothing.
+	if !anyFileBackedArtifact(artifacts) {
+		return artifacts, nil
+	}
 	src := filepath.Join(filepath.Dir(dest), originRunID)
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -332,42 +338,100 @@ func carryOriginEvidence(sctx *pipeline.StepContext, originRunID string, artifac
 	if err := copyDirContents(src, dest); err != nil {
 		return nil, fmt.Errorf("copy the originating run's evidence: %w", err)
 	}
-	return rebaseCarriedArtifacts(artifacts, src, dest)
+	carried, ok := rebaseCarriedArtifacts(artifacts, dest)
+	if !ok {
+		return nil, errors.New("no carried file artifact arrived in this run's evidence directory")
+	}
+	return carried, nil
+}
+
+// anyFileBackedArtifact reports whether any artifact names a local file, which
+// is the only kind the copy exists for.
+func anyFileBackedArtifact(artifacts []types.TestArtifact) bool {
+	for _, artifact := range artifacts {
+		if strings.TrimSpace(artifact.Path) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // rebaseCarriedArtifacts points each carried artifact at its copy in THIS
-// run's evidence directory.
+// run's evidence directory, and keeps only the ones a file actually backs.
 //
-// The paths matter as much as the files. The evidence prompt tells the agent
-// to record paths exactly where it created them, so a real file artifact is
-// absolute under the originating run's directory - and the PR renderer accepts
-// an absolute artifact path only when it resolves under the repository root or
-// under THIS run's evidence directory (sanitizeAbsoluteArtifactPath). Carrying
-// the paths unchanged therefore drops every one of them at render time, which
-// silently defeats the whole carry. An absolute path outside the originating
-// directory is dropped instead of rewritten: nothing copied it, so no file
-// backs it here.
-func rebaseCarriedArtifacts(artifacts []types.TestArtifact, src, dest string) ([]types.TestArtifact, error) {
-	rebased := make([]types.TestArtifact, 0, len(artifacts))
+// The paths matter as much as the files. The evidence prompt has the agent
+// record paths exactly where it wrote them, so a file artifact is absolute
+// under the run directory that produced it - and the PR renderer accepts an
+// absolute artifact path only when it resolves under the repository root or
+// under THIS run's evidence directory (sanitizeAbsoluteArtifactPath). Carried
+// unchanged, every such path is dropped at render time and the carry silently
+// does nothing.
+//
+// Which run directory a path names cannot be assumed. On the third run of a
+// branch the predecessor was itself a reuse, so its paths already name ITS
+// directory rather than the originating one - the case the origin pointer
+// exists for. So the rebase is relative to the shared evidence ROOT, taking
+// whatever sits below the run-directory segment, and then the result is
+// confirmed on disk. Existence is the real test: it makes the rebase correct
+// for any predecessor without reasoning about which one it was, and it is
+// what "never cite a file this PR does not carry" actually requires.
+//
+// Only a path artifact needs a file. The prompt offers url and content
+// artifacts too, and the renderer shows those with nothing on disk, so they
+// are carried untouched and a verdict evidenced entirely that way needs no
+// copy at all.
+func rebaseCarriedArtifacts(artifacts []types.TestArtifact, dest string) ([]types.TestArtifact, bool) {
+	evidenceRoot := filepath.Dir(dest)
+	kept := make([]types.TestArtifact, 0, len(artifacts))
+	fileBacked, survived := 0, 0
 	for _, artifact := range artifacts {
-		path := strings.TrimSpace(artifact.Path)
-		if path == "" || !filepath.IsAbs(path) {
-			// A relative path is recorded relative to the evidence directory
-			// itself, so the copy already put a file where it points.
-			rebased = append(rebased, artifact)
+		recorded := strings.TrimSpace(artifact.Path)
+		if recorded == "" {
+			// A url or content artifact: nothing to copy, nothing to rebase.
+			kept = append(kept, artifact)
 			continue
 		}
-		rel, err := filepath.Rel(src, filepath.Clean(path))
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		fileBacked++
+		rebased, ok := rebaseArtifactPath(recorded, evidenceRoot, dest)
+		if !ok {
 			continue
 		}
-		artifact.Path = filepath.Join(dest, rel)
-		rebased = append(rebased, artifact)
+		artifact.Path = rebased
+		kept = append(kept, artifact)
+		survived++
 	}
-	if len(rebased) == 0 {
-		return nil, errors.New("no carried artifact resolves inside the originating run's evidence directory")
+	// A carry "failed" only when files were expected and none of them arrived.
+	if fileBacked > 0 && survived == 0 {
+		return nil, false
 	}
-	return rebased, nil
+	return kept, true
+}
+
+// rebaseArtifactPath maps one recorded artifact path onto this run's evidence
+// directory, reporting false when no file backs the result. A relative path is
+// already relative to the evidence directory, so it only needs confirming.
+func rebaseArtifactPath(recorded, evidenceRoot, dest string) (string, bool) {
+	if !filepath.IsAbs(recorded) {
+		if _, err := os.Stat(filepath.Join(dest, recorded)); err != nil {
+			return "", false
+		}
+		return recorded, true
+	}
+	rel, err := filepath.Rel(evidenceRoot, filepath.Clean(recorded))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		// Outside the evidence root entirely: nothing copied it here.
+		return "", false
+	}
+	segments := strings.Split(rel, string(filepath.Separator))
+	if len(segments) < 2 {
+		// The evidence root itself, or a bare run directory, names no file.
+		return "", false
+	}
+	rebased := filepath.Join(dest, filepath.Join(segments[1:]...))
+	if _, err := os.Stat(rebased); err != nil {
+		return "", false
+	}
+	return rebased, true
 }
 
 // gatedTestOutcome builds the step outcome for a run whose live-evidence agent
