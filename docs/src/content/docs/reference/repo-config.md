@@ -823,7 +823,7 @@ Which changed paths do **not** count as product or UI files, and therefore wheth
 | | |
 | --- | --- |
 | Type | `string[]` (glob patterns) |
-| Default | Documentation and markdown, test files and test fixtures, CI workflow definitions, scripts and tooling directories, lockfiles, and `.no-mistakes.yaml` |
+| Default | Documentation and markdown, test files and test fixtures, CI workflow definitions, scripts and tooling directories, and `.no-mistakes.yaml` |
 
 This is the classification the Test step's diff-class gate reads. It only takes effect when the gate is enabled with [`test.evidence_gate: diff-class`](#testevidence_gate); with the gate at its default it is parsed and validated but never consulted. The configured [`commands.test`](#commandstest) is unaffected and still runs on every run; what this bounds is the separate live-evidence turn, which stands the product up and drives end-user scenarios. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the behavior this selects, including the reuse of an earlier `go` verdict on the same branch and the fact that a reused verdict publishes no live-validation claim for the head it did not drive.
 
@@ -837,6 +837,8 @@ test:
     - "**/testdata/**"     # that directory wherever it appears
     - "gen/api.pb.go"      # one exact path
 ```
+
+Lockfiles are deliberately **not** in the default list, unlike every other class in it. A lockfile change swaps the dependency versions the product actually ships and runs, so it is a runtime change even though no first-party source moved, and a lockfile-only diff is the ordinary shape of a dependabot or renovate bump. Listing one would give exactly those runs an automatic `no-surface`, which never parks, so a dependency upgrade would ship with neither live validation nor a human decision.
 
 Setting the key **replaces** the whole default list rather than adding to it, so a narrowed list must restate the defaults it still wants. An explicitly empty list (`non_product_paths: []`) is the deliberate opt-out: every changed path is product code, so the evidence agent runs on every run. A pattern Git-style globbing would reject fails the config rather than silently matching nothing.
 

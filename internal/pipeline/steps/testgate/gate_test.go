@@ -318,6 +318,40 @@ func TestTestStep_ProductChangeRunsTheEvidenceAgent(t *testing.T) {
 	}
 }
 
+// TestTestStep_LockfileOnlyChangeRunsTheEvidenceAgent: a lockfile change swaps
+// the dependency versions the product ships and runs, so it is a runtime
+// change even though no first-party source moved - and a lockfile-only diff is
+// the ordinary shape of a dependabot or renovate bump and of any transitive
+// update. Classifying it non-product would give exactly those runs an
+// automatic no-surface, which never parks, so a dependency upgrade would ship
+// with neither live validation nor a human decision.
+func TestTestStep_LockfileOnlyChangeRunsTheEvidenceAgent(t *testing.T) {
+	t.Parallel()
+	for _, lockfile := range []string{"go.sum", "package-lock.json", "yarn.lock", "Cargo.lock", "poetry.lock", "Gemfile.lock"} {
+		t.Run(lockfile, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, _ := stepstest.SetupGitRepo(t)
+			if err := os.Remove(filepath.Join(dir, "feature.txt")); err != nil {
+				t.Fatal(err)
+			}
+			head := commitFiles(t, dir, "bump a dependency", map[string]string{lockfile: "pinned\n"})
+			ag := gateAgent()
+			sctx := gateContext(t, ag, dir, baseSHA, head)
+
+			outcome, err := (&steps.TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ag.Calls) != 1 {
+				t.Fatalf("evidence agent invocations = %d, want 1: a dependency bump changes what runs", len(ag.Calls))
+			}
+			if got := parseOutcomeFindings(t, outcome).EvidenceSource; got != types.TestEvidenceSourceAgent {
+				t.Fatalf("evidence source = %q, want %q", got, types.TestEvidenceSourceAgent)
+			}
+		})
+	}
+}
+
 // TestTestStep_NonProductOnlyChangeSkipsTheAgentWithoutParking is the gate's
 // whole point. A docs-only run has no live-drivable surface by construction,
 // so it records an AUTOMATIC no-surface and proceeds; the agent's own
@@ -335,7 +369,6 @@ func TestTestStep_NonProductOnlyChangeSkipsTheAgentWithoutParking(t *testing.T) 
 		}},
 		{name: "ci workflow only", files: map[string]string{".github/workflows/ci.yml": "name: ci\n"}},
 		{name: "scripts only", files: map[string]string{"scripts/release.sh": "#!/bin/sh\n"}},
-		{name: "lockfile only", files: map[string]string{"go.sum": "h1:abc\n"}},
 		{name: "pipeline config only", files: map[string]string{".no-mistakes.yaml": "commands:\n  test: go test ./...\n"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -818,7 +851,6 @@ func TestTestStep_GateOffRunsTheAgentAndRecordsNothing(t *testing.T) {
 		}},
 		{name: "ci workflow only", files: map[string]string{".github/workflows/ci.yml": "name: ci\n"}},
 		{name: "scripts only", files: map[string]string{"scripts/release.sh": "#!/bin/sh\n"}},
-		{name: "lockfile only", files: map[string]string{"go.sum": "h1:abc\n"}},
 		{name: "pipeline config only", files: map[string]string{".no-mistakes.yaml": "commands:\n  test: go test ./...\n"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -189,49 +189,123 @@ func TestReuseCarriesTheOriginatingRunsArtifacts(t *testing.T) {
 
 // A carried artifact's recorded path decides whether it survives rendering at
 // all: sanitizeAbsoluteArtifactPath accepts an absolute path only under the
-// repository root or under THIS run's evidence directory, and the evidence
-// prompt has the agent record paths exactly where it wrote them - absolute,
-// under the ORIGINATING run's directory. Carrying those paths unchanged drops
-// every artifact at render time and silently defeats the carry, so the
-// rebasing is the part that has to be pinned.
+// repository root or THIS run's evidence directory, and the evidence prompt
+// has the agent record paths exactly where it wrote them. So the rebasing is
+// the part that has to be pinned - and it cannot assume WHICH run directory a
+// path names, because from the third run of a branch onward the predecessor
+// was itself a reuse whose paths already name its own directory.
 func TestCarriedArtifactPathsPointAtThisRunsCopy(t *testing.T) {
 	root := t.TempDir()
-	src := filepath.Join(root, "run-1")
-	dest := filepath.Join(root, "run-2")
-	for _, dir := range []string{src, dest} {
+	origin := filepath.Join(root, "run-1")
+	predecessor := filepath.Join(root, "run-2")
+	dest := filepath.Join(root, "run-3")
+	for _, dir := range []string{origin, predecessor, dest} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(src, "checkout.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"checkout.png", "token.png"} {
+		if err := os.WriteFile(filepath.Join(origin, name), []byte("png"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	sctx := &pipeline.StepContext{EvidenceDir: dest}
 
 	carried, err := carryOriginEvidence(sctx, "run-1", []types.TestArtifact{
-		{Label: "absolute under the origin", Path: filepath.Join(src, "checkout.png")},
-		{Label: "relative to the evidence dir", Path: "token.png"},
-		{Label: "absolute somewhere else", Path: filepath.Join(root, "elsewhere", "secret.png")},
+		{Label: "absolute under the origin", Path: filepath.Join(origin, "checkout.png")},
+		{Label: "absolute under a predecessor that already rebased", Path: filepath.Join(predecessor, "token.png")},
+		{Label: "relative to the evidence dir", Path: "checkout.png"},
+		{Label: "an externally visible artifact", URL: "https://ci.example/run/1"},
+		{Label: "inline output", Content: "all 4 scenarios passed"},
+		{Label: "absolute outside the evidence root", Path: filepath.Join(t.TempDir(), "secret.png")},
+		{Label: "a file nothing copied", Path: "missing.png"},
 	})
 	if err != nil {
 		t.Fatalf("carrying evidence forward: %v", err)
 	}
-	if len(carried) != 2 {
-		t.Fatalf("carried = %+v, want the origin-relative and relative artifacts only", carried)
-	}
-	if want := filepath.Join(dest, "checkout.png"); carried[0].Path != want {
-		t.Errorf("absolute artifact path = %q, want it rebased onto this run at %q", carried[0].Path, want)
-	}
-	if carried[1].Path != "token.png" {
-		t.Errorf("relative artifact path = %q, want it untouched", carried[1].Path)
-	}
+
+	byLabel := map[string]types.TestArtifact{}
 	for _, a := range carried {
-		if strings.Contains(a.Path, "secret.png") {
-			t.Errorf("an artifact outside the originating directory was kept: %+v", a)
+		byLabel[a.Label] = a
+	}
+	// The predecessor case is f1: rebasing relative to the ORIGIN would yield
+	// ../run-2/token.png and drop it, collapsing the whole chain at run three.
+	for label, wantPath := range map[string]string{
+		"absolute under the origin":                         filepath.Join(dest, "checkout.png"),
+		"absolute under a predecessor that already rebased": filepath.Join(dest, "token.png"),
+		"relative to the evidence dir":                      "checkout.png",
+	} {
+		got, ok := byLabel[label]
+		if !ok {
+			t.Errorf("%q was dropped; want it carried at %q", label, wantPath)
+			continue
+		}
+		if got.Path != wantPath {
+			t.Errorf("%q path = %q, want %q", label, got.Path, wantPath)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dest, "checkout.png")); err != nil {
-		t.Fatalf("evidence file did not reach this run's directory: %v", err)
+	// url and content artifacts need no file and are carried untouched.
+	if got, ok := byLabel["an externally visible artifact"]; !ok || got.URL != "https://ci.example/run/1" {
+		t.Errorf("a url artifact must survive untouched, got %+v", got)
+	}
+	if got, ok := byLabel["inline output"]; !ok || got.Content != "all 4 scenarios passed" {
+		t.Errorf("a content artifact must survive untouched, got %+v", got)
+	}
+	// Nothing copied these, so citing them would name a file the PR lacks.
+	for _, label := range []string{"absolute outside the evidence root", "a file nothing copied"} {
+		if _, ok := byLabel[label]; ok {
+			t.Errorf("%q must be dropped: no file backs it here", label)
+		}
+	}
+}
+
+// A verdict evidenced entirely by url or content artifacts has no file to
+// copy, so it must not be made to depend on the originating directory still
+// existing - that would throw its scenarios away for nothing.
+func TestCarryOriginEvidenceNeedsNoFilesForURLOnlyArtifacts(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "run-2")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sctx := &pipeline.StepContext{EvidenceDir: dest}
+
+	artifacts := []types.TestArtifact{
+		{Label: "ci run", URL: "https://ci.example/run/1"},
+		{Label: "output", Content: "all scenarios passed"},
+	}
+	// run-1's directory does not exist at all here, which is the point.
+	carried, err := carryOriginEvidence(sctx, "run-1", artifacts)
+	if err != nil {
+		t.Fatalf("a url/content-only verdict must not need the originating directory: %v", err)
+	}
+	if len(carried) != 2 {
+		t.Fatalf("carried = %+v, want both artifacts untouched", carried)
+	}
+}
+
+// When files WERE expected and none arrived, the carry has failed and the
+// caller drops the scenarios with them.
+func TestCarryOriginEvidenceFailsWhenNoExpectedFileArrives(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "run-1")
+	dest := filepath.Join(root, "run-2")
+	for _, dir := range []string{origin, dest} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The directory is populated, so the copy runs, but nothing it holds
+	// matches the recorded artifact.
+	if err := os.WriteFile(filepath.Join(origin, "unrelated.log"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx := &pipeline.StepContext{EvidenceDir: dest}
+
+	if _, err := carryOriginEvidence(sctx, "run-1", []types.TestArtifact{
+		{Label: "checkout", Path: filepath.Join(origin, "checkout.png")},
+	}); err == nil {
+		t.Fatal("a file artifact that never arrived must fail the carry, not be published")
 	}
 }
 

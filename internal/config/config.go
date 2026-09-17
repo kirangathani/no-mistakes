@@ -871,8 +871,18 @@ type TestRaw struct {
 // DefaultNonProductPaths is the built-in answer to "which changed paths cannot
 // carry a live-drivable product change": documentation and markdown, test
 // files and test fixtures, CI workflow definitions, scripts and tooling
-// directories, lockfiles, and the pipeline's own config file. A repository
-// replaces the whole list through test.non_product_paths.
+// directories, and the pipeline's own config file. A repository replaces the
+// whole list through test.non_product_paths.
+//
+// Lockfiles are deliberately NOT here, unlike every other class above. A
+// lockfile change swaps the dependency versions the product actually ships
+// and runs, so it is a runtime change even though no first-party source moved
+// - and a lockfile-ONLY diff is the ordinary shape of a dependabot or
+// renovate bump, of `npm audit fix`, and of any transitive update. Listing
+// them would give exactly those runs an automatic no-surface, which by design
+// never parks, so a dependency upgrade would ship with neither live
+// validation nor a human decision. Every other class here genuinely cannot
+// change runtime behavior; that is what earns a skip.
 //
 // The test-file entries mirror isTestFile's naming conventions in
 // internal/pipeline/steps. They are restated here as data on purpose: the
@@ -893,9 +903,6 @@ var DefaultNonProductPaths = []string{
 	".circleci/**", "azure-pipelines.yml", "Jenkinsfile",
 	// scripts and tooling directories
 	"scripts/**", "tools/**", "hack/**",
-	// lockfiles
-	"go.sum", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock",
-	"poetry.lock", "uv.lock", "composer.lock", "Gemfile.lock", "Pipfile.lock",
 	// the pipeline's own config
 	".no-mistakes.yaml", ".no-mistakes.yml",
 }

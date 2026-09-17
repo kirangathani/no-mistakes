@@ -137,11 +137,23 @@ func TestDefaultNonProductPathsCoverEveryDeclaredClass(t *testing.T) {
 		"*_test.go", "**/testdata/**", // test files and fixtures
 		".github/workflows/**", // CI workflow files
 		"scripts/**",           // scripts and tooling directories
-		"go.sum",               // lockfiles
 		".no-mistakes.yaml",    // the pipeline's own config
 	} {
 		if !slices.Contains(DefaultNonProductPaths, pattern) {
 			t.Errorf("DefaultNonProductPaths is missing %q", pattern)
+		}
+	}
+	// A lockfile change swaps the dependency versions the product ships and
+	// runs, and a lockfile-only diff is the ordinary shape of a dependency
+	// bump. Listing one here would hand exactly those runs an automatic
+	// no-surface, which never parks, so the upgrade would ship with neither
+	// live validation nor a human decision.
+	for _, pattern := range []string{
+		"go.sum", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock",
+		"poetry.lock", "uv.lock", "composer.lock", "Gemfile.lock", "Pipfile.lock",
+	} {
+		if slices.Contains(DefaultNonProductPaths, pattern) {
+			t.Errorf("DefaultNonProductPaths must not skip lockfile %q: a dependency bump is a runtime change", pattern)
 		}
 	}
 	// Every default must itself be a usable pattern.
