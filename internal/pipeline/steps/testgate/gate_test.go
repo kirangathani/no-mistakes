@@ -779,6 +779,59 @@ func TestTestStep_FailingBaselineDefeatsReuse(t *testing.T) {
 	}
 }
 
+// TestTestStep_FixRoundNeverReusesAnEarlierVerdict: a Test fix round exists
+// because THIS run's own evidence reported a problem, and
+// GetBranchTestEvidence excludes the current run, so every verdict reachable
+// from a fix round predates the finding being repaired. Republishing one would
+// publish a go over evidence this run has already contradicted.
+//
+// Every other reuse condition is satisfied here - same branch, same intent,
+// newest verdict, green baseline, and only a test file changed since the go
+// was earned - so the fix round is the only thing that can decline it.
+func TestTestStep_FixRoundNeverReusesAnEarlierVerdict(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := stepstest.SetupGitRepo(t)
+	validated := commitFiles(t, dir, "product change", map[string]string{
+		"internal/checkout/checkout.go": "package checkout\n",
+	})
+	head := commitFiles(t, dir, "repair the failing test", map[string]string{
+		"internal/checkout/checkout_test.go": "package checkout\n",
+	})
+	ag := gateAgent()
+	sctx := gateContext(t, ag, dir, baseSHA, head)
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[{"id":"test-1","severity":"error","action":"auto-fix","description":"scenario user reaches the success screen failed"}]}`
+	recordPriorGoVerdict(t, sctx, validated)
+
+	outcome, err := (&steps.TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := evidenceTurns(ag); got != 1 {
+		t.Fatalf("evidence agent invocations = %d, want 1 (a fix round must re-earn its verdict)", got)
+	}
+	findings := parseOutcomeFindings(t, outcome)
+	if findings.EvidenceSource != types.TestEvidenceSourceAgent {
+		t.Fatalf("evidence source = %q, want %q", findings.EvidenceSource, types.TestEvidenceSourceAgent)
+	}
+	if findings.TestedHeadSHA != head {
+		t.Fatalf("tested head = %q, want this run's head %q", findings.TestedHeadSHA, head)
+	}
+}
+
+// evidenceTurns counts the live-evidence invocations only. A fix round asks
+// the agent to repair the failure first, so the raw call count would report
+// that turn as though the gate had let the evidence turn run.
+func evidenceTurns(ag *stepstest.MockAgent) int {
+	turns := 0
+	for _, call := range ag.Calls {
+		if strings.Contains(call.Prompt, "driving the product itself") {
+			turns++
+		}
+	}
+	return turns
+}
+
 // TestTestStep_RepoConfigOverridesTheNonProductClassification proves the
 // classification is the repository's to set: a repo that declares its own
 // generated directory non-product skips the turn for a change confined to it,
