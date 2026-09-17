@@ -113,12 +113,11 @@ func TestRequireActionAcceptsAttestationCarryingLiveValidation(t *testing.T) {
 	}
 }
 
-// Under the diff-class gate a verdict can be reused from an earlier run on the
-// same branch, and it is restamped with this head, so head equality alone no
-// longer proves a freshly driven turn. The attestation names the producer so a
-// consumer can tell them apart - and every enforcing repository's copy of the
-// action has to keep accepting the body with that extra key present, which is
-// the only thing that proves adding the field cannot break every PR.
+// Under the diff-class gate, head equality alone no longer identifies which
+// producer wrote the verdict, so the attestation names it in an extra source
+// key. Every enforcing repository's copy of the action has to keep accepting a
+// body carrying that key, which is the only thing that proves adding the field
+// cannot break every PR.
 func TestRequireActionAcceptsAttestationCarryingAReusedEvidenceSource(t *testing.T) {
 	body := liveValidatedPipelineBodyFromSource(t, []types.TestScenario{
 		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},

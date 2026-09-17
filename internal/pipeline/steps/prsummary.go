@@ -83,8 +83,11 @@ type pipelineAttestationLiveValidation struct {
 	// no-product-change conclusion. Omitted when the gate is off and for every
 	// run recorded before it existed, so those attestations stay byte-identical
 	// to a build without the gate. Under the gate, head equality alone no
-	// longer proves a freshly driven turn - a reused verdict is restamped with
-	// this head - so a consumer that needs that distinction reads this field.
+	// longer proves a freshly driven turn - an automatic no-product-change
+	// verdict belongs to this head with no agent turn behind it, and a reused
+	// verdict keeps the head it was driven at, so live_validation is omitted
+	// for the published head entirely - so a consumer that needs that
+	// distinction reads this field.
 	Source string `json:"source,omitempty"`
 }
 
