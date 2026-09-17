@@ -204,6 +204,14 @@ func matchNonProductPattern(file, pattern string) bool {
 // recorded for a head that is no longer reachable simply fails the git read
 // and does not reuse.
 //
+// That diff is the ONLY way a reuse is accepted, including the decision-only
+// re-run where the prior verdict names this very head: git reports an empty
+// diff for a commit against itself, so the general path already reaches that
+// decision. One acceptance path costs a git invocation against the turn this
+// gate exists to avoid, and it fails in the safe direction - an unreadable
+// repository declines the reuse and runs the agent rather than granting one
+// without ever reading the tree.
+//
 // Same-intent is the fourth narrowing condition, and it is about what the
 // verdict MEANS rather than what the product does. The evidence turn derives
 // its scenarios from the run's user intent, and an --intent supplied one is
@@ -240,10 +248,6 @@ func reusableBranchVerdict(sctx *pipeline.StepContext, nonProduct []string) (tes
 	findings, parseErr := types.ParseFindingsJSON(prior.FindingsJSON)
 	if parseErr != nil || findings.Verdict != types.TestVerdictGo || findings.TestedHeadSHA == "" {
 		return testEvidenceDecision{}, false
-	}
-	if findings.TestedHeadSHA == sctx.Run.HeadSHA {
-		// Same head, nothing to diff.
-		return reuseDecision(prior.RunID, findings), true
 	}
 	product, diffErr := diffProductPaths(sctx.Ctx, sctx.WorkDir, nonProduct, findings.TestedHeadSHA+".."+sctx.Run.HeadSHA)
 	if diffErr != nil {
