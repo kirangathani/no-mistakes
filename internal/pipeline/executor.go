@@ -171,6 +171,15 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	// The gate loop dispatches on the action, so an unknown one is refused
 	// here while the gate stays parked for a valid response, rather than
 	// being delivered to a switch it cannot match.
+	// ActionAnswer is review-only, but that is NOT enforced here. Narrowing this
+	// check to the review step would move the refusal earlier than
+	// executeStep's gate switch, and that switch's refusal is what
+	// TestExecutor_AnswerActionIsRefusedForAnyStepButReview drives: deleting it
+	// has to fail a test, which is the property that test was written to have.
+	// No path reaches a non-review step with this action anyway - `axi respond`
+	// refuses it, the TUI never sends it, and the answer handler hardcodes the
+	// review step, which the step-mismatch check below enforces.
+	//
 	// ActionAnswer belongs here even though `axi respond` refuses it: the CLI
 	// guard is what keeps an operator from releasing a review gate with open
 	// questions, while the daemon's own answer handler releases the gate
@@ -571,6 +580,16 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		if response.action == types.ActionAnswer {
 			state.answering = true
+			// Carry the parked gate's outstanding set into the finalize round.
+			// The live path keeps it in locals across `continue rounds`, so an
+			// answer there never loses it; this path rebuilds the state from
+			// scratch, and seeding it empty would let the finalize round start
+			// with nothing outstanding and complete a review clean over
+			// findings no rereview ever verified - the exact failure the
+			// append-only set exists to prevent. An answer resolves the
+			// question it answers, never the code findings beside it.
+			state.outstandingFindings = gate.findings
+			state.selectedOutstandingIDs = gate.selectedOutstandingIDs
 			// Inherit the parked gate's fix-round context, or the two answer
 			// paths disagree. A question can be asked by a rereview INSIDE a
 			// fix round, which parks as fix_review; the live path leaves

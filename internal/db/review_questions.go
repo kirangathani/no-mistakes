@@ -115,7 +115,14 @@ func (d *DB) GetBranchReviewAnswers(repoID, branch string, limit int) ([]ReviewA
 		        answer, answered_by, answered_at, updated_at
 		   FROM review_questions
 		  WHERE repo_id = ? AND branch = ?
-		  ORDER BY updated_at DESC, question_id DESC, ask_ordinal DESC
+		  -- rowid breaks the tie, because updated_at cannot: every ask settled
+		  -- in one run is re-upserted by each later review round and so shares
+		  -- one second, and a question_id tie-break orders q1, q10, q11, q2 -
+		  -- id order, not ask order. The table is not WITHOUT ROWID, so its
+		  -- implicit rowid is a monotonic insertion key that an upsert leaves
+		  -- alone, which is the recency both callers' comments claim to render
+		  -- and what the row limit must keep.
+		  ORDER BY updated_at DESC, rowid DESC
 		  LIMIT ?`,
 		repoID, branch, limit+1,
 	)

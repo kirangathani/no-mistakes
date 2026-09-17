@@ -291,3 +291,111 @@ func TestExecutor_RecoveredAnswerRoundInheritsAFixReviewGatesContext(t *testing.
 		t.Fatal("the recovered answer round reads as a fix round")
 	}
 }
+
+// TestExecutor_RecoveredAnswerRoundKeepsTheOutstandingFindings covers what the
+// answer round must NOT resolve. The live path keeps the outstanding set in
+// locals across its `continue rounds`, so an answer there never loses it; the
+// recovered path rebuilds the state from scratch, and seeding it empty let the
+// finalize round start with nothing outstanding and complete the review clean
+// over a finding no rereview ever verified.
+//
+// The gate here parks on a code finding that was selected for a fix AND a
+// question; the answer settles only the question, so a clean finalize turn must
+// still leave f-1 outstanding and re-park rather than completing the step.
+func TestExecutor_RecoveredAnswerRoundKeepsTheOutstandingFindings(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	first := `{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","description":"bug","action":"auto-fix"}],"summary":"1 issue"}`
+	round1, err := database.InsertReviewStepRound(stepResult.ID, 1, "initial", &first, nil, "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := `["f-1"]`
+	if err := database.SetStepRoundSelection(round1.ID, &selected, db.RoundSelectionSourceAutoFix); err != nil {
+		t.Fatal(err)
+	}
+	// The parked gate carries both: the unverified code finding and the
+	// question the rereview asked.
+	findings := `{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","description":"bug","action":"auto-fix"},{"id":"question-q1","severity":"warning","description":"Review question awaiting an answer: was the fix meant to change this?","action":"ask-user","category":"review-question"}],"summary":"one open question"}`
+	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertReviewStepRound(stepResult.ID, 2, "auto_fix", &findings, &selected, "", 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusFixReview, 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	finalized := make(chan struct{})
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			select {
+			case <-finalized:
+			default:
+				close(finalized)
+			}
+			// A clean turn that reviewed the file: it reports nothing, which is
+			// silence about f-1 rather than verification of it.
+			return &StepOutcome{}, nil
+		},
+	}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 0}}, newFakeSessionAgent(), []Step{step}, nil)
+
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(context.Background(), run, repo, t.TempDir()) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered fix_review gate never accepted an answer")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case <-finalized:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered finalize turn never ran")
+	}
+
+	// The step must NOT complete: f-1 was selected for a fix and never
+	// positively verified, so it is still outstanding and still parks.
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	got, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || got[0].FindingsJSON == nil || !strings.Contains(*got[0].FindingsJSON, `"f-1"`) {
+		t.Fatalf("the recovered answer round dropped the outstanding findings: %+v", got)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("recovered executor timed out")
+	}
+}
