@@ -64,7 +64,7 @@ func TestGetBranchTestEvidence_ScopesToOtherRunsOnTheSameBranch(t *testing.T) {
 
 // Only the most recently recorded evidence is returned at all: an older
 // verdict a later run has already superseded must never outrank it.
-func TestGetBranchTestEvidence_ReturnsOnlyTheNewestCompletion(t *testing.T) {
+func TestGetBranchTestEvidence_ReturnsOnlyTheNewestRecordedVerdict(t *testing.T) {
 	d := openTestDB(t)
 	repo, err := d.InsertRepo(t.TempDir(), "https://example.invalid/a", "main")
 	if err != nil {
@@ -94,10 +94,10 @@ func TestGetBranchTestEvidence_ReturnsOnlyTheNewestCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got == nil {
-		t.Fatal("entry = nil, want the most recently completed run")
+		t.Fatal("entry = nil, want the most recently recorded run")
 	}
 	if got.RunID != ids[2] {
-		t.Fatalf("entry = %s, want only the most recently completed run %s", got.RunID, ids[2])
+		t.Fatalf("entry = %s, want only the most recently recorded run %s", got.RunID, ids[2])
 	}
 }
 
