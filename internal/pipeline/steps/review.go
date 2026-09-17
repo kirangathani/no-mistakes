@@ -218,7 +218,11 @@ Previous review findings to address:
 	// net-deleted-author-lines git-diff backstop for the removal-of-required
 	// class - a fixer round that net-deletes author-added lines parks
 	// regardless of intent source. Held pending a scope decision.
-	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction + reviewQuestionProtocolSection(convDir, loadReviewConversation(sctx, convDir))
+	asked, err := loadReviewConversation(sctx, convDir)
+	if err != nil {
+		return nil, err
+	}
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction + reviewQuestionProtocolSection(convDir, asked)
 
 	// Path-scoped repository review guidance, taken from the trusted
 	// default-branch config copy (regardless of allow_repo_commands) so a pushed
@@ -376,7 +380,10 @@ Risk assessment (after listing all findings):
 	// the step re-parked on the same question forever, because a fix round's
 	// rereview is deliberately session-free.
 	if sctx.FinalizingAnswers && convDir != "" {
-		conv := loadReviewConversation(sctx, convDir)
+		conv, err := loadReviewConversation(sctx, convDir)
+		if err != nil {
+			return nil, err
+		}
 		if answers := reviewAnswersPromptSection(conv); answers != "" {
 			turnPrompt = prompt + answers
 			how := "resuming"
@@ -428,7 +435,10 @@ Risk assessment (after listing all findings):
 	// become ask-user findings, which is what parks the step in
 	// waiting-on-answers. The step never completes on its own with a question
 	// open; a human's approval still can, and the PR body says so.
-	conv := loadReviewConversation(sctx, convDir)
+	conv, err := loadReviewConversation(sctx, convDir)
+	if err != nil {
+		return nil, err
+	}
 	recordAnsweredQuestions(sctx, conv)
 	questionFindings := openReviewQuestionFindings(conv)
 	if len(questionFindings) > 0 {

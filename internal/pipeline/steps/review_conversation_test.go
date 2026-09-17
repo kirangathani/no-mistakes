@@ -1116,3 +1116,51 @@ func TestReviewPromptNamesTheConversationDirectoryAsABoundaryException(t *testin
 		t.Fatalf("the exception does not name %q, so it reads as a general licence: %q", convDir, exception)
 	}
 }
+
+// TestReviewStep_UnreadableConversationFailsTheReview pins the read side of the
+// same fail-closed rule the answer path already has. Only the questions the
+// load returns become findings, so swallowing a read failure produced no open
+// question, no park, and a review that completed as if the reviewer had asked
+// nothing. Absence is still absence: a run whose reviewer asked nothing never
+// creates the directory and must complete normally.
+func TestReviewStep_UnreadableConversationFailsTheReview(t *testing.T) {
+	t.Run("unreadable", func(t *testing.T) {
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		sctx := withReviewConversation(newTestContextWithDBRecords(t, newStaticReviewAgent(cleanReviewJSON), dir, baseSHA, headSHA, config.Commands{}))
+		convDir := reviewConversationDir(sctx)
+		if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"]}`); err != nil {
+			t.Fatalf("seed question: %v", err)
+		}
+		path := filepath.Join(convDir, reviewqa.QuestionsFile)
+		if err := os.Chmod(path, 0o000); err != nil {
+			t.Skip("cannot restrict file permissions")
+		}
+		t.Cleanup(func() { os.Chmod(path, 0o644) })
+		if f, err := os.Open(path); err == nil {
+			f.Close()
+			t.Skip("this environment reads a mode 0000 file anyway")
+		}
+
+		if _, err := (&ReviewStep{}).Execute(sctx); err == nil {
+			t.Fatal("an unreadable conversation completed the review with no questions")
+		} else if !strings.Contains(err.Error(), "read the review conversation") {
+			t.Fatalf("execute error = %v, want it to name the unreadable conversation", err)
+		}
+	})
+
+	t.Run("missing directory", func(t *testing.T) {
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		sctx := withReviewConversation(newTestContextWithDBRecords(t, newStaticReviewAgent(cleanReviewJSON), dir, baseSHA, headSHA, config.Commands{}))
+		if _, err := os.Stat(reviewConversationDir(sctx)); !os.IsNotExist(err) {
+			t.Fatalf("conversation directory already exists: %v", err)
+		}
+
+		outcome, err := (&ReviewStep{}).Execute(sctx)
+		if err != nil {
+			t.Fatalf("a run whose reviewer asked nothing failed: %v", err)
+		}
+		if got := questionFindings(t, outcome.Findings); len(got) != 0 {
+			t.Fatalf("question findings without a conversation: %+v", got)
+		}
+	})
+}

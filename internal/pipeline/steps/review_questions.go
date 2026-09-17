@@ -44,26 +44,29 @@ func reviewConversationDir(sctx *pipeline.StepContext) string {
 }
 
 // loadReviewConversation reads the run's conversation, logging any bounded
-// protocol note the reader produced. A read failure is not fatal: the review
-// turn's findings still stand, and a conversation nobody can read is treated
-// as no conversation rather than a failed review.
-func loadReviewConversation(sctx *pipeline.StepContext, dir string) reviewqa.Conversation {
+// protocol note the reader produced.
+//
+// A read failure is fatal to the step, matching the refusal the answer path
+// already gives: only the questions this load returns become findings, so a
+// conversation file that exists but cannot be opened would otherwise produce
+// no open question, no park, and a review that completes as if the reviewer
+// had asked nothing. Absence is not failure - an off conversation, a missing
+// directory and a missing file are all ordinary empty conversations, which
+// reviewqa.Load already distinguishes.
+func loadReviewConversation(sctx *pipeline.StepContext, dir string) (reviewqa.Conversation, error) {
 	if dir == "" {
-		return reviewqa.Conversation{}
+		return reviewqa.Conversation{}, nil
 	}
 	conv, err := reviewqa.Load(dir)
 	if err != nil {
-		if sctx != nil && sctx.Log != nil {
-			sctx.Log(fmt.Sprintf("could not read the review conversation (%v); continuing without it", err))
-		}
-		return reviewqa.Conversation{}
+		return reviewqa.Conversation{}, fmt.Errorf("read the review conversation: %w", err)
 	}
 	if sctx != nil && sctx.Log != nil {
 		for _, note := range conv.Notes {
 			sctx.Log("review conversation: " + note)
 		}
 	}
-	return conv
+	return conv, nil
 }
 
 // reviewQuestionProtocolSection tells the reviewer how to ask while it works.

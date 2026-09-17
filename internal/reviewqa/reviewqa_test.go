@@ -582,3 +582,78 @@ func TestARetractionLeavesAnEarlierSettledAskAlone(t *testing.T) {
 		t.Fatalf("ask 1 lost its own pairing: %#v / %#v", settled[0].Question, settled[0].Answer)
 	}
 }
+
+// TestAskOrdinalsSurviveTheLineCap drives the real retention path: the file
+// passes maxLines, its leading lines are dropped, and an id asked both before
+// and after that cut must keep the ordinal it was asked with.
+//
+// The stamp on an answer is computed against the FULL history at append time,
+// so numbering the survivors from 1 renumbered every surviving re-ask: a valid
+// answer stopped matching its question (the gate parks forever) or an older
+// answer attached to a different ask (a major question silently answered).
+func TestAskOrdinalsSurviveTheLineCap(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{`{"id":"q1","question":"first ask","options":["a","b"]}`}
+	for i := 0; i < maxLines+3; i++ {
+		lines = append(lines, fmt.Sprintf(`{"id":"filler%d","question":"f %d","options":["a"]}`, i, i))
+	}
+	// The second ask of q1 is the newest line, so it survives the cap while
+	// the first ask is in the dropped prefix.
+	lines = append(lines, `{"id":"q1","question":"second ask","options":["a","b"]}`)
+	write(t, dir, QuestionsFile, lines...)
+	write(t, dir, AnswersFile, `{"id":"q1","answer":"b","ask_ordinal":2}`)
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var q1 *Entry
+	for i := range conv.Entries {
+		if conv.Entries[i].ID == "q1" {
+			q1 = &conv.Entries[i]
+		}
+	}
+	if q1 == nil {
+		t.Fatal("q1 was dropped by the cap; the fixture no longer exercises the retained re-ask")
+	}
+	if q1.Question.Question != "second ask" {
+		t.Fatalf("q1 = %q, want the retained second ask", q1.Question.Question)
+	}
+	if !q1.Answered() {
+		t.Fatalf("the answer stamped for ask 2 did not settle it: %+v", q1)
+	}
+	for _, a := range conv.Asks {
+		if a.Question.ID == "q1" && a.Ordinal != 2 {
+			t.Fatalf("retained ask of q1 numbered %d, want 2", a.Ordinal)
+		}
+	}
+}
+
+// TestLoadSettlesNothingWhenTheQuestionFileWasNotReadToTheEnd covers the other
+// truncation: a scan that stopped short cannot know an id's later asks, so the
+// last line it saw is not provably the last ask and a stamped answer must not
+// be allowed to report a live question as answered. Fails toward OPEN.
+func TestLoadSettlesNothingWhenTheQuestionFileWasNotReadToTheEnd(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, QuestionsFile,
+		`{"id":"q1","question":"keep the legacy route?","options":["keep","remove"]}`,
+		// Over the scanner's per-line budget, so the scan stops here and the
+		// rest of the file is never seen.
+		`{"id":"q2","question":"`+strings.Repeat("x", maxLineBytes)+`"}`,
+	)
+	write(t, dir, AnswersFile, `{"id":"q1","answer":"keep","ask_ordinal":1}`)
+
+	conv, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(conv.Open()) != 1 || conv.Open()[0].ID != "q1" {
+		t.Fatalf("open = %+v, want q1 still open on a short scan", conv.Open())
+	}
+	if len(conv.SettledAsks()) != 0 {
+		t.Fatalf("a short scan settled %d ask(s)", len(conv.SettledAsks()))
+	}
+	if !strings.Contains(strings.Join(conv.Notes, "\n"), "could not be read to the end") {
+		t.Fatalf("short scan not disclosed: %v", conv.Notes)
+	}
+}

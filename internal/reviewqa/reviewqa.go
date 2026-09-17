@@ -246,13 +246,27 @@ func Load(dir string) (Conversation, error) {
 		return conv, nil
 	}
 
-	questionLines, qTruncated, err := readLines(filepath.Join(dir, QuestionsFile))
+	questionLines, droppedQuestionLines, questionsIncomplete, err := readLines(filepath.Join(dir, QuestionsFile))
 	if err != nil {
 		return conv, err
 	}
-	answerLines, aTruncated, err := readLines(filepath.Join(dir, AnswersFile))
+	answerLines, droppedAnswerLines, answersIncomplete, err := readLines(filepath.Join(dir, AnswersFile))
 	if err != nil {
 		return conv, err
+	}
+
+	// An ask ordinal is a line's position among EVERY accepted question line
+	// for its id in the file, so which lines are RETAINED must never shift it:
+	// an answer carries the ordinal it was stamped with against the full
+	// history, so renumbering the survivors of the maxLines cap detached valid
+	// answers from their questions and let an older answer settle a different
+	// ask. The scan saw the dropped prefix before discarding it, so its asks
+	// are counted here and every retained line is numbered from that tally.
+	base := make(map[string]int, len(droppedQuestionLines))
+	for _, line := range droppedQuestionLines {
+		if q, _, ok := classifyQuestionLine(line); ok {
+			base[q.ID]++
+		}
 	}
 
 	order := make([]string, 0, len(questionLines))
@@ -276,47 +290,28 @@ func Load(dir string) (Conversation, error) {
 	// direction here and also the behaviour under a byte-truncated answers
 	// file.
 	asks := make(map[string]int, len(questionLines))
-	// Every accepted question line per id, in file order, so an earlier ask
+	for id, n := range base {
+		asks[id] = n
+	}
+	// Every retained question line per id, in file order, so an earlier ask
 	// survives a later one for the durable store's benefit.
 	lines := make(map[string][]Question, len(questionLines))
 	askOrder := make([]string, 0, len(questionLines))
 	answersByID := make(map[string][]Answer, len(answerLines))
 	for _, line := range questionLines {
-		var q Question
-		if err := json.Unmarshal([]byte(line), &q); err != nil {
-			conv.Notes = append(conv.Notes, "skipped a malformed questions.ndjson line")
+		q, note, ok := classifyQuestionLine(line)
+		switch {
+		case note != "":
+			conv.Notes = append(conv.Notes, note)
 			continue
-		}
-		q.ID = strings.TrimSpace(q.ID)
-		if q.ID == "" {
-			conv.Notes = append(conv.Notes, "skipped a questions.ndjson line with no id")
-			continue
-		}
-		switch strings.TrimSpace(q.Kind) {
-		case KindRetract:
-			if entry, ok := byID[q.ID]; ok {
+		case !ok:
+			// A retraction: it carries no question text, so it is never an ask.
+			if entry, exists := byID[q.ID]; exists {
 				entry.Retracted = true
 				entry.Reason = q.Reason
 			} else {
 				conv.Notes = append(conv.Notes, fmt.Sprintf("retraction for unknown question %q ignored", q.ID))
 			}
-			continue
-		case KindQuestion, "":
-			q.Kind = KindQuestion
-		default:
-			conv.Notes = append(conv.Notes, fmt.Sprintf("skipped question %q with unknown kind %q", q.ID, q.Kind))
-			continue
-		}
-		if strings.TrimSpace(q.Question) == "" {
-			conv.Notes = append(conv.Notes, fmt.Sprintf("skipped question %q with no question text", q.ID))
-			continue
-		}
-		// Routing by weight is the reviewer's own job, so a minor question is
-		// never escalated on its behalf: emitting one is the protocol
-		// violation, and reporting it keeps that visible instead of parking
-		// the run on a question the reviewer was told to decide itself.
-		if strings.EqualFold(strings.TrimSpace(q.Weight), WeightMinor) {
-			conv.Notes = append(conv.Notes, fmt.Sprintf("dropped minor-weight question %q; the reviewer decides minor questions itself", q.ID))
 			continue
 		}
 		asks[q.ID]++
@@ -361,13 +356,20 @@ func Load(dir string) (Conversation, error) {
 	// Pair every ask with the answer that settled it, and let the LAST ask of
 	// an id be the entry's state: the gate needs the latest, the durable store
 	// needs them all, and one rule for both keeps them from disagreeing.
+	//
+	// A questions.ndjson the scan could not read to the end settles NOTHING:
+	// the ask a stamped answer names may be past the seen region, and the last
+	// line we saw for an id is not necessarily its last ask, so attaching
+	// answers there could report a live question as answered. Fail toward OPEN.
 	seen := make(map[string]int, len(lines))
 	conv.Asks = make([]Ask, 0, len(askOrder))
 	for _, id := range askOrder {
 		seen[id]++
-		ordinal := seen[id]
-		ask := Ask{Ordinal: ordinal, Question: lines[id][ordinal-1]}
-		ask.Answer = settlingAnswer(answersByID[id], ordinal)
+		ordinal := base[id] + seen[id]
+		ask := Ask{Ordinal: ordinal, Question: lines[id][seen[id]-1]}
+		if !questionsIncomplete {
+			ask.Answer = settlingAnswer(answersByID[id], ordinal)
+		}
 		conv.Asks = append(conv.Asks, ask)
 		if ordinal == asks[id] {
 			byID[id].Answer = ask.Answer
@@ -378,10 +380,51 @@ func Load(dir string) (Conversation, error) {
 	for _, id := range order {
 		conv.Entries = append(conv.Entries, *byID[id])
 	}
-	if qTruncated || aTruncated {
+	if questionsIncomplete || answersIncomplete || len(droppedQuestionLines) > 0 || len(droppedAnswerLines) > 0 {
 		conv.Notes = append(conv.Notes, "review conversation file exceeded its size bound; older lines were not read")
 	}
+	if questionsIncomplete {
+		conv.Notes = append(conv.Notes, "questions.ndjson could not be read to the end; no answer settles a question until it can be")
+	}
 	return conv, nil
+}
+
+// classifyQuestionLine decides what one questions.ndjson line is, applying the
+// acceptance rules in one place so the dropped prefix can be counted for ask
+// ordinals with exactly the rules the retained lines get.
+//
+// A non-empty note is a stateless rejection, already phrased for the operator.
+// Otherwise ok reports whether the line is an ASK; the one line that is neither
+// is a retraction, whose effect depends on state this function does not have.
+func classifyQuestionLine(line string) (Question, string, bool) {
+	var q Question
+	if err := json.Unmarshal([]byte(line), &q); err != nil {
+		return q, "skipped a malformed questions.ndjson line", false
+	}
+	q.ID = strings.TrimSpace(q.ID)
+	if q.ID == "" {
+		return q, "skipped a questions.ndjson line with no id", false
+	}
+	switch strings.TrimSpace(q.Kind) {
+	case KindRetract:
+		q.Kind = KindRetract
+		return q, "", false
+	case KindQuestion, "":
+		q.Kind = KindQuestion
+	default:
+		return q, fmt.Sprintf("skipped question %q with unknown kind %q", q.ID, q.Kind), false
+	}
+	if strings.TrimSpace(q.Question) == "" {
+		return q, fmt.Sprintf("skipped question %q with no question text", q.ID), false
+	}
+	// Routing by weight is the reviewer's own job, so a minor question is
+	// never escalated on its behalf: emitting one is the protocol violation,
+	// and reporting it keeps that visible instead of parking the run on a
+	// question the reviewer was told to decide itself.
+	if strings.EqualFold(strings.TrimSpace(q.Weight), WeightMinor) {
+		return q, fmt.Sprintf("dropped minor-weight question %q; the reviewer decides minor questions itself", q.ID), false
+	}
+	return q, "", true
 }
 
 // settlingAnswer returns the answer stamped for this ask of one id - the latest
@@ -447,25 +490,31 @@ func appendLine(dir, name string, payload any) error {
 
 // readLines returns the non-empty lines of an ndjson file, newest-last and
 // bounded. A missing file is no lines and no error.
-func readLines(path string) ([]string, bool, error) {
+//
+// It reports its two bounds separately because they have different
+// consequences for the reader. dropped carries the leading lines the maxLines
+// cap removed, verbatim and in file order: the scan SAW them, so a caller that
+// numbers lines can still count them and keep its numbering stable.
+// incomplete says the scan never reached the end of the file (the maxFileBytes
+// cut, or a scanner error), so what lies beyond the seen region is unknowable.
+func readLines(path string) (kept, dropped []string, incomplete bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, false, nil
+			return nil, nil, false, nil
 		}
-		return nil, false, fmt.Errorf("open %s: %w", filepath.Base(path), err)
+		return nil, nil, false, fmt.Errorf("open %s: %w", filepath.Base(path), err)
 	}
 	defer f.Close()
 
 	var lines []string
-	truncated := false
 	read := 0
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64<<10), maxLineBytes)
 	for scanner.Scan() {
 		read += len(scanner.Bytes()) + 1
 		if read > maxFileBytes {
-			truncated = true
+			incomplete = true
 			break
 		}
 		line := strings.TrimSpace(scanner.Text())
@@ -477,11 +526,11 @@ func readLines(path string) ([]string, bool, error) {
 	if err := scanner.Err(); err != nil {
 		// A line over the scanner budget, or a torn read while the reviewer is
 		// still appending. Keep what parsed rather than losing the file.
-		truncated = true
+		incomplete = true
 	}
 	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
-		truncated = true
+		cut := len(lines) - maxLines
+		dropped, lines = lines[:cut], lines[cut:]
 	}
-	return lines, truncated, nil
+	return lines, dropped, incomplete, nil
 }

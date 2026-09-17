@@ -139,6 +139,16 @@ later re-ask of that `id`. That binding has to come from the writer: at read
 time two asks and two answers look identical whether the second answer corrects
 the first ask or answers the re-ask, and that ambiguity is the whole defect.
 
+The count the stamp is taken against is every accepted question line for that
+`id` in the file, so which lines the reader retains never shifts it: the reader
+counts the leading lines its line bound discards rather than renumbering the
+survivors. Where the reader could not reach the end of `questions.ndjson` at all
+- its byte bound, or an unreadable line - a later ask of an `id` is unknowable,
+so nothing in that load is settled and every question stays open. A read that
+FAILS is not an empty conversation either: the review step stops, exactly as the
+answer path refuses, because a swallowed failure would complete a review with no
+open question rather than parking on the ones that were asked.
+
 An answer for an unknown or retracted `id` is recorded and ignored, never an
 error: the writer may be racing a retraction it has not read yet. Ignored is
 permanent in both cases. An unknown `id` carries no `ask_ordinal`, so a later
