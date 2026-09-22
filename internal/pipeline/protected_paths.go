@@ -9,6 +9,15 @@ import (
 
 const protectedPathFindingID = "protected-path-refusal"
 
+// ReviewQuestionsUnreadableFindingID is the single synthetic finding the review
+// step emits when the reviewer's question history could not be read in full.
+// It is one fixed finding rather than a class of them, so it is keyed by ID
+// exactly as the protected-path refusal above is, and deliberately carries no
+// review-question category: that category summons the answer-first gate help,
+// and an answer is precisely what the daemon refuses while the history is
+// unreadable.
+const ReviewQuestionsUnreadableFindingID = "review-questions-unreadable"
+
 // HasProtectedPathRefusal identifies gates that require an explicit response.
 func HasProtectedPathRefusal(findingsJSON string) bool {
 	findings, _ := types.ParseFindingsJSON(findingsJSON)
@@ -40,6 +49,31 @@ func HasUnansweredReviewQuestion(findingsJSON string) bool {
 		return false
 	}
 	return types.HasReviewQuestion(findings)
+}
+
+// HasUnreadableReviewQuestionHistory identifies gates an automatic resolver
+// must leave alone because the reviewer's question history could not be read in
+// full, so the decision this gate asks for cannot be made from the findings.
+//
+// Without it the marker is an ordinary actionable ask-user finding: gateResolution
+// selects its id and returns ActionFix, the fixer is handed "decide this gate
+// yourself" as work it cannot do, the rereview re-emits the identical marker,
+// and the resulting fix_review gate is approved as already-fixed - so a
+// possibly-dropped major question reaches nobody and the park costs a fix round
+// instead of buying a human decision. Same carve-out shape, and the same one
+// predicate for every automatic path, as HasUnansweredReviewQuestion above; a
+// human's own approve, fix or skip stays allowed.
+func HasUnreadableReviewQuestionHistory(findingsJSON string) bool {
+	findings, err := types.ParseFindingsJSON(findingsJSON)
+	if err != nil {
+		return false
+	}
+	for _, finding := range findings.Items {
+		if finding.ID == ReviewQuestionsUnreadableFindingID {
+			return true
+		}
+	}
+	return false
 }
 
 type ProtectedPathError struct {

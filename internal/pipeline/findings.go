@@ -754,6 +754,15 @@ func filterFindingsJSON(raw string, ids []string) string {
 // gone. Keyed on the category rather than the "question-" ID prefix, like every
 // other consumer of these findings, and every other finding keeps upstream's
 // append-only guarantee untouched.
+//
+// The unreadable-question-history marker goes with them, keyed by its ID
+// because it deliberately carries no category, but for a DIFFERENT reason: it
+// has no File, so leaving it in the verification input sets hasUnanchoredFinding
+// in resolveVerifiedFindingsJSON and refuses to clear ANY selected finding while
+// the history is incomplete - which questions.ndjson being append-only makes
+// permanent. A genuinely fixed finding would then stay outstanding and the gate
+// re-park on it for ever. It is re-emitted from the live conversation on every
+// review turn exactly as the questions are, so dropping it loses nothing either.
 func dropReviewQuestionFindingsJSON(raw string) string {
 	if raw == "" {
 		return raw
@@ -762,15 +771,15 @@ func dropReviewQuestionFindingsJSON(raw string) string {
 	if err != nil {
 		return raw
 	}
-	if !types.HasReviewQuestion(findings) {
-		return raw
-	}
 	kept := make([]types.Finding, 0, len(findings.Items))
 	for _, item := range findings.Items {
-		if item.Category == types.FindingCategoryReviewQuestion {
+		if item.Category == types.FindingCategoryReviewQuestion || item.ID == ReviewQuestionsUnreadableFindingID {
 			continue
 		}
 		kept = append(kept, item)
+	}
+	if len(kept) == len(findings.Items) {
+		return raw
 	}
 	if len(kept) == 0 {
 		return ""

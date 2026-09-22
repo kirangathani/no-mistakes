@@ -80,6 +80,39 @@ func TestModel_Yolo_OpenReviewQuestionSendsNoAutomaticResponse(t *testing.T) {
 	}
 }
 
+// TestModel_Yolo_UnreadableQuestionHistorySendsNoAutomaticResponse is the TUI
+// half of the second carve-out. The unreadable-history marker carries no
+// review-question category on purpose - an answer is what the daemon refuses
+// there - so the question guard above does not cover it, and without its own
+// predicate yolo selected it as ordinary work, handed the FIXER "decide this
+// gate yourself", and then approved the fix_review gate as already-fixed.
+func TestModel_Yolo_UnreadableQuestionHistorySendsNoAutomaticResponse(t *testing.T) {
+	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+		t.Run(string(status), func(t *testing.T) {
+			sock, client, snapshot := captureRespond(t)
+			run := testRun()
+			fj := `{"findings":[{"id":"review-questions-unreadable","severity":"warning","description":"The reviewer's question history could not be read in full. Decide this gate yourself.","action":"ask-user"}],"summary":"unreadable question history"}`
+			run.Steps = []ipc.StepResultInfo{{StepName: types.StepReview, Status: status, FindingsJSON: &fj}}
+			m := NewModel(sock, client, run)
+			m.yoloMode = true
+			m.stepDiffLoaded[types.StepReview] = true
+			for range 2 {
+				if cmd := m.maybeAutoApproveCmd(); cmd != nil {
+					if msg := cmd(); msg != nil {
+						t.Fatalf("automatic response failed: %v", msg)
+					}
+				}
+			}
+			if calls := snapshot(); len(calls) != 0 {
+				t.Fatalf("an unreadable question history was auto-resolved: %+v", calls)
+			}
+			if m.yoloFixed[types.StepReview] || m.yoloApproved[types.StepReview] {
+				t.Fatal("an unreadable question history consumed yolo bookkeeping without a human decision")
+			}
+		})
+	}
+}
+
 // A review gate carrying ORDINARY findings is still yolo's to fix, so the guard
 // must key on the question category and nothing broader.
 func TestModel_Yolo_OrdinaryReviewFindingsAreStillFixed(t *testing.T) {

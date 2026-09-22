@@ -583,15 +583,13 @@ func TestARetractionLeavesAnEarlierSettledAskAlone(t *testing.T) {
 	}
 }
 
-// TestAskOrdinalsSurviveTheLineCap drives the real retention path: the file
-// passes maxLines, its leading lines are dropped, and an id asked both before
-// and after that cut must keep the ordinal it was asked with.
-//
-// The stamp on an answer is computed against the FULL history at append time,
-// so numbering the survivors from 1 renumbered every surviving re-ask: a valid
-// answer stopped matching its question (the gate parks forever) or an older
-// answer attached to a different ask (a major question silently answered).
-func TestAskOrdinalsSurviveTheLineCap(t *testing.T) {
+// TestLineCapDroppingAQuestionLineSettlesNothing drives the real retention
+// path: the file passes maxLines and its leading lines are dropped, so the
+// history can no longer be read in full and no stamped answer may settle an
+// ask. The dropped prefix may hold an OPEN question that has no Entry here at
+// all, so reporting anything as settled could release the gate on a major
+// question nobody saw.
+func TestLineCapDroppingAQuestionLineSettlesNothing(t *testing.T) {
 	dir := t.TempDir()
 	lines := []string{`{"id":"q1","question":"first ask","options":["a","b"]}`}
 	for i := 0; i < maxLines+3; i++ {
@@ -619,24 +617,14 @@ func TestAskOrdinalsSurviveTheLineCap(t *testing.T) {
 	if q1.Question.Question != "second ask" {
 		t.Fatalf("q1 = %q, want the retained second ask", q1.Question.Question)
 	}
-	// The ordinal is the subject: numbering the survivors from 1 would call
-	// this retained re-ask ask 1, and the answer stamped for ask 2 at append
-	// time would then name a question that no longer exists.
-	for _, a := range conv.Asks {
-		if a.Question.ID == "q1" && a.Ordinal != 2 {
-			t.Fatalf("retained ask of q1 numbered %d, want 2", a.Ordinal)
-		}
-	}
-	// Settling is suppressed while question lines are missing, which is a
-	// separate rule from the ordinal one and the reason this file's two read
-	// bounds now agree: the dropped prefix may hold an OPEN question that has
-	// no Entry here at all, so nothing in this conversation may be reported as
-	// settled until the history can be read in full.
 	if !conv.QuestionsIncomplete {
 		t.Fatal("the line cap dropped question lines but the history reads as complete")
 	}
 	if q1.Answered() {
 		t.Fatalf("an incomplete question history settled an ask: %+v", q1)
+	}
+	if len(conv.SettledAsks()) != 0 {
+		t.Fatalf("an incomplete question history reported settled asks: %+v", conv.SettledAsks())
 	}
 }
 

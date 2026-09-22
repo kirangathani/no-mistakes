@@ -821,6 +821,16 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 				fmt.Fprintf(progress, "%s: an open review question needs an explicit answer (no-mistakes axi answer --question <id> --answer \"...\"); --yes leaves this gate awaiting one\n", gate.Name)
 				return run, false, nil
 			}
+			// The reviewer's question history could not be read in full, so
+			// the gate asks a human to decide it: answers are refused, and a
+			// fixer handed "decide this gate yourself" can only edit code and
+			// converge on an approve. Keyed on the finding ID rather than the
+			// review-question category, which this marker deliberately does not
+			// carry because the answer-first help would be wrong for it.
+			if pipeline.HasUnreadableReviewQuestionHistory(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: the reviewer's question history could not be read in full, so only a human can decide this gate; --yes leaves it awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
 			gateKey := gate.Name + "\x00" + gate.Status
 			if pendingGate == gateKey {
 				// Duplicate or delayed events can race persistence after a response.

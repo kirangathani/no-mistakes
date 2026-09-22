@@ -253,7 +253,7 @@ func Load(dir string) (Conversation, error) {
 		return conv, nil
 	}
 
-	questionLines, droppedQuestionLines, questionsIncomplete, err := readLines(filepath.Join(dir, QuestionsFile))
+	questionLines, droppedQuestionLine, questionsIncomplete, err := readLines(filepath.Join(dir, QuestionsFile))
 	// Both read bounds have to fail the same way, and they did not. The byte
 	// bound stops the scan, so the tail is unseen and nothing settles. The line
 	// cap instead KEEPS the newest lines and drops a prefix - and Entries are
@@ -272,27 +272,13 @@ func Load(dir string) (Conversation, error) {
 	// same and deliberately does not set it: an answer that scrolled out of the
 	// window cannot settle anything either way, and the ask it belonged to
 	// simply stays open, which is the safe direction.
-	questionsIncomplete = questionsIncomplete || len(droppedQuestionLines) > 0
+	questionsIncomplete = questionsIncomplete || droppedQuestionLine
 	if err != nil {
 		return conv, err
 	}
-	answerLines, droppedAnswerLines, answersIncomplete, err := readLines(filepath.Join(dir, AnswersFile))
+	answerLines, droppedAnswerLine, answersIncomplete, err := readLines(filepath.Join(dir, AnswersFile))
 	if err != nil {
 		return conv, err
-	}
-
-	// An ask ordinal is a line's position among EVERY accepted question line
-	// for its id in the file, so which lines are RETAINED must never shift it:
-	// an answer carries the ordinal it was stamped with against the full
-	// history, so renumbering the survivors of the maxLines cap detached valid
-	// answers from their questions and let an older answer settle a different
-	// ask. The scan saw the dropped prefix before discarding it, so its asks
-	// are counted here and every retained line is numbered from that tally.
-	base := make(map[string]int, len(droppedQuestionLines))
-	for _, line := range droppedQuestionLines {
-		if q, _, ok := classifyQuestionLine(line); ok {
-			base[q.ID]++
-		}
 	}
 
 	order := make([]string, 0, len(questionLines))
@@ -316,9 +302,6 @@ func Load(dir string) (Conversation, error) {
 	// direction here and also the behaviour under a byte-truncated answers
 	// file.
 	asks := make(map[string]int, len(questionLines))
-	for id, n := range base {
-		asks[id] = n
-	}
 	// Every retained question line per id, in file order, so an earlier ask
 	// survives a later one for the durable store's benefit.
 	lines := make(map[string][]Question, len(questionLines))
@@ -391,7 +374,7 @@ func Load(dir string) (Conversation, error) {
 	conv.Asks = make([]Ask, 0, len(askOrder))
 	for _, id := range askOrder {
 		seen[id]++
-		ordinal := base[id] + seen[id]
+		ordinal := seen[id]
 		ask := Ask{Ordinal: ordinal, Question: lines[id][seen[id]-1]}
 		if !questionsIncomplete {
 			ask.Answer = settlingAnswer(answersByID[id], ordinal)
@@ -406,7 +389,7 @@ func Load(dir string) (Conversation, error) {
 	for _, id := range order {
 		conv.Entries = append(conv.Entries, *byID[id])
 	}
-	if questionsIncomplete || answersIncomplete || len(droppedQuestionLines) > 0 || len(droppedAnswerLines) > 0 {
+	if questionsIncomplete || answersIncomplete || droppedAnswerLine {
 		conv.Notes = append(conv.Notes, "review conversation file exceeded its size bound; older lines were not read")
 	}
 	if questionsIncomplete {
@@ -417,8 +400,7 @@ func Load(dir string) (Conversation, error) {
 }
 
 // classifyQuestionLine decides what one questions.ndjson line is, applying the
-// acceptance rules in one place so the dropped prefix can be counted for ask
-// ordinals with exactly the rules the retained lines get.
+// acceptance rules in one place.
 //
 // A non-empty note is a stateless rejection, already phrased for the operator.
 // Otherwise ok reports whether the line is an ASK; the one line that is neither
@@ -518,19 +500,19 @@ func appendLine(dir, name string, payload any) error {
 // readLines returns the non-empty lines of an ndjson file, newest-last and
 // bounded. A missing file is no lines and no error.
 //
-// It reports its two bounds separately because they have different
-// consequences for the reader. dropped carries the leading lines the maxLines
-// cap removed, verbatim and in file order: the scan SAW them, so a caller that
-// numbers lines can still count them and keep its numbering stable.
+// It reports its two bounds separately because the caller treats them
+// differently per file. dropped says the maxLines cap removed a leading prefix;
 // incomplete says the scan never reached the end of the file (the maxFileBytes
-// cut, or a scanner error), so what lies beyond the seen region is unknowable.
-func readLines(path string) (kept, dropped []string, incomplete bool, err error) {
+// cut, or a scanner error). For questions.ndjson both mean the same thing - the
+// history cannot be read in full, so nothing settles - while a dropped ANSWER
+// line only leaves its ask open, which is already the safe direction.
+func readLines(path string) (kept []string, dropped, incomplete bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, false, nil
+			return nil, false, false, nil
 		}
-		return nil, nil, false, fmt.Errorf("open %s: %w", filepath.Base(path), err)
+		return nil, false, false, fmt.Errorf("open %s: %w", filepath.Base(path), err)
 	}
 	defer f.Close()
 
@@ -556,8 +538,8 @@ func readLines(path string) (kept, dropped []string, incomplete bool, err error)
 		incomplete = true
 	}
 	if len(lines) > maxLines {
-		cut := len(lines) - maxLines
-		dropped, lines = lines[:cut], lines[cut:]
+		dropped = true
+		lines = lines[len(lines)-maxLines:]
 	}
 	return lines, dropped, incomplete, nil
 }

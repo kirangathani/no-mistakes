@@ -895,6 +895,51 @@ func TestUnreadableQuestionHistoryParksEvenWithNothingOpen(t *testing.T) {
 	}
 }
 
+// TestUnreadableQuestionHistoryReplacesTheAnswerableRows covers the other half
+// of that condition, and it is the one an appending reviewer actually reaches:
+// the line cap drops a question line while the retained window still holds open
+// questions. Every "question-<id>" row ends in "Answer it with: no-mistakes axi
+// answer --question <id>", and RunManager.HandleAnswerReviewQuestion refuses
+// every answer for a conversation whose history is incomplete, so each row
+// instructed a command guaranteed to fail. One marker replaces them all, and it
+// names the ids it is standing in for so the loss is bounded rather than
+// silent.
+func TestUnreadableQuestionHistoryReplacesTheAnswerableRows(t *testing.T) {
+	conv := reviewqa.Conversation{
+		QuestionsIncomplete: true,
+		Entries: []reviewqa.Entry{
+			{Question: reviewqa.Question{ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"}}},
+			{Question: reviewqa.Question{ID: "q2", Question: "split the module?", Options: []string{"yes", "no"}}},
+		},
+	}
+	if len(conv.Open()) != 2 {
+		t.Fatalf("fixture must have open questions, got %d", len(conv.Open()))
+	}
+
+	findings := openReviewQuestionFindings(conv)
+
+	if len(findings) != 1 {
+		t.Fatalf("an incomplete history with open questions emitted %d findings, want only the marker: %+v", len(findings), findings)
+	}
+	got := findings[0]
+	if got.ID != pipeline.ReviewQuestionsUnreadableFindingID {
+		t.Fatalf("finding ID = %q, want the unreadable marker", got.ID)
+	}
+	if got.Category == types.FindingCategoryReviewQuestion {
+		t.Fatalf("the marker parked as a review question, so it needs an answer the daemon refuses: %+v", got)
+	}
+	if strings.Contains(got.Description, "axi answer") {
+		t.Fatalf("the marker instructs an answer the daemon refuses: %s", got.Description)
+	}
+	// The open ids are the only handle a human has on what the retained window
+	// did hold, so the marker has to name them and say how many.
+	for _, want := range []string{"q1", "q2", "2 question(s)", "questions.ndjson"} {
+		if !strings.Contains(got.Description, want) {
+			t.Fatalf("marker missing %q: %s", want, got.Description)
+		}
+	}
+}
+
 // TestOpenReviewQuestionFindingsAreBounded covers the channel the questions
 // borrow rather than own. The findings payload rides the IPC event stream, and
 // one frame over the transport limit kills the whole subscription - so an

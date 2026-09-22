@@ -118,6 +118,14 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if pipeline.HasUnansweredReviewQuestion(m.stepFindings[step.StepName]) {
 		return nil
 	}
+	// Same standing-consent rule for the gate that parks because the question
+	// history could not be read in full: answers are refused there, so nothing
+	// yolo can send settles it and the fixer would only be handed "decide this
+	// gate yourself". Keyed on the finding ID, which is the one predicate every
+	// automatic path reads.
+	if pipeline.HasUnreadableReviewQuestionHistory(m.stepFindings[step.StepName]) {
+		return nil
+	}
 	if !m.approvalReady(step) {
 		return nil
 	}

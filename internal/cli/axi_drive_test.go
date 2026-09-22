@@ -909,3 +909,79 @@ func TestDriveRun_YesStillResolvesAGateWithoutAReviewQuestion(t *testing.T) {
 		t.Fatal("a finding was treated as a review question on its ID prefix alone")
 	}
 }
+
+// TestDriveRun_YesLeavesAnUnreadableQuestionHistoryAwaitingAHuman covers the
+// gate the review step parks when the reviewer's question history could not be
+// read in full. That marker deliberately carries no review-question category -
+// an answer is exactly what the daemon refuses for such a conversation - so the
+// carve-out above does not reach it, and without its own predicate
+// gateResolution selected its id, returned ActionFix, and handed the fixer
+// "Decide this gate yourself" as work; the rereview re-emitted the identical
+// marker and the fix_review gate was then approved as already-fixed, so the
+// possibly-dropped major question reached nobody.
+func TestDriveRun_YesLeavesAnUnreadableQuestionHistoryAwaitingAHuman(t *testing.T) {
+	socketPath := filepath.Join(makeSocketSafeTempDir(t), "unreadable-history.sock")
+	srv := ipc.NewServer()
+	var responses atomic.Int32
+	srv.Handle(ipc.MethodRespond, func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		responses.Add(1)
+		return nil, errors.New("unexpected automatic response to an unreadable question history")
+	})
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(socketPath) }()
+	t.Cleanup(func() {
+		srv.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("IPC server did not stop")
+		}
+	})
+	var client *ipc.Client
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		client, err = ipc.Dial(socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if client == nil {
+		t.Fatal("IPC server did not become ready")
+	}
+	defer client.Close()
+
+	findings := `{"findings":[` +
+		`{"id":"review-questions-unreadable","severity":"warning","description":"The reviewer's question history could not be read in full. Decide this gate yourself.","action":"ask-user"},` +
+		`{"id":"f1","severity":"warning","description":"ordinary finding","action":"auto-fix"}` +
+		`],"summary":"unreadable question history"}`
+	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+		t.Run(string(status), func(t *testing.T) {
+			parked := &ipc.RunInfo{
+				ID: "run-1", Status: types.RunRunning,
+				Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: status, FindingsJSON: &findings}},
+			}
+			source := &scriptedRunStateSource{
+				subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
+				runs:          []*ipc.RunInfo{parked},
+			}
+			reconciler := newRunReconciler(source, parked.ID)
+			defer reconciler.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var progress bytes.Buffer
+			run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
+			if err != nil || run != parked || ciReady || responses.Load() != 0 {
+				t.Fatalf("--yes resolved a gate parked on an unreadable question history: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
+			}
+			// It must NOT be sold as an answer: the daemon refuses one here.
+			if strings.Contains(progress.String(), "axi answer") {
+				t.Fatalf("progress told the operator to answer a conversation the daemon refuses: %s", progress.String())
+			}
+			if !strings.Contains(progress.String(), "could not be read in full") {
+				t.Fatalf("progress does not name the cause: %s", progress.String())
+			}
+		})
+	}
+}

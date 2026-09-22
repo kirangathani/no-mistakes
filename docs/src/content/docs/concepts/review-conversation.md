@@ -158,6 +158,27 @@ unanswered, with a later answer for it recorded as an orphan. Reaching it takes
 more than 2000 accepted question lines in one run, which is precisely the
 runaway-appending reviewer the bound exists for.
 
+The review step has its own rule for that condition, and it replaces the
+question channel rather than adding to it: when the question history could not
+be read in full, the step emits ONE `ask-user` warning
+(`review-questions-unreadable`) instead of any `question-<id>` row, whatever
+remains open. Every one of those rows would end in "Answer it with:
+`no-mistakes axi answer --question <id>`", and the answer path refuses every
+answer for such a conversation, so each row would instruct a command guaranteed
+to fail. The warning names the ids and count of the questions that were still
+open in the part of the history that was read, and points at the run's
+`questions.ndjson` as the full record, so the loss is bounded rather than
+silent. It deliberately carries no review-question category: that category is
+what resumes the reviewer once nothing is open, and nothing may resume a
+reviewer off a history it could not read. Both automatic resolvers - `axi
+--yes` and the TUI's yolo - instead stand aside on it by finding ID, because a
+fixer handed "decide this gate yourself" can only edit code and converge on an
+approve; a human's own approve, fix or skip stays allowed. For the same
+no-file reason it is also dropped from the review carry-forward's verification
+input, exactly as an open question is: it anchors to no path, so leaving it in
+would refuse to clear every genuinely fixed finding for as long as the
+append-only history stayed incomplete.
+
 A dropped ANSWER line is deliberately not the same: an answer that scrolled out
 of the window cannot settle anything either way, and the ask it belonged to
 simply stays open, which is the safe direction. The answer
