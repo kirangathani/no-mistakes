@@ -2046,3 +2046,64 @@ func TestRereviewProvenanceIsNotContradictedByThePreviousRunsRounds(t *testing.T
 		}
 	}
 }
+
+// TestSupersededRoundsDoNotClaimTheCommitsAreTheAuthors covers the reachable
+// case the selector's own breadth creates. The previous run on this branch took
+// a pipeline fix round and COMPLETED, which certifies its range and removes it
+// from uncertified_pipeline_ranges - so this run's UncertifiedSourceRunID is
+// empty, BindPreviousRunReviewRounds does not skip it, and the fixer's commits
+// sit inside this ordinary review's own base..head scope.
+//
+// This review is neither a fix round nor carries an uncertified range, so
+// fixRoundProvenanceClause contributes nothing and the superseded-rounds block
+// is the ONLY provenance statement in the prompt. Asserting the commits are the
+// author's own therefore told the reviewer to apply the ordinary author
+// standard to pipeline-authored code - the exact inversion of the anti-ratchet
+// rule. The section must not characterise their authorship in either direction.
+func TestSupersededRoundsDoNotClaimTheCommitsAreTheAuthors(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			j, _ := json.Marshal(cleanReviewFindings())
+			return &agent.Result{Output: j}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	previousFindings := `{"findings":[{"id":"f-9","severity":"error","description":"drops the straggler","action":"ask-user"}],"summary":"1 issue"}`
+	sctx.PreviousRunReviewRounds = []*db.StepRound{{
+		Round:        2,
+		Trigger:      "auto_fix",
+		FindingsJSON: &previousFindings,
+	}}
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected one ordinary review call, got %d", len(ag.calls))
+	}
+	prompt := ag.calls[0].Prompt
+
+	if !strings.Contains(prompt, "Previous run's review rounds on this branch:") {
+		t.Fatalf("the previous run's rounds did not reach the review prompt:\n%s", prompt)
+	}
+	// The mechanism that makes the claim load-bearing: nothing else in this
+	// prompt directs the standard, so whatever this section says about
+	// authorship is what the reviewer acts on.
+	if strings.Contains(prompt, "Fix-round provenance:") {
+		t.Fatalf("fixture is meant to be an ordinary review with no provenance clause:\n%s", prompt)
+	}
+	for _, claim := range []string{
+		"the change author's own",
+		"not pipeline-authored fix-round commits",
+	} {
+		if strings.Contains(prompt, claim) {
+			t.Fatalf("the superseded-rounds block claims %q, but the previous run's fix-round commits are in this run's scope:\n%s", claim, prompt)
+		}
+	}
+}

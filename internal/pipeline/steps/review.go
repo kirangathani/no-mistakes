@@ -451,7 +451,11 @@ Risk assessment (after listing all findings):
 	recordAnsweredQuestions(sctx, conv)
 	questionFindings := openReviewQuestionFindings(conv)
 	if len(questionFindings) > 0 {
-		sctx.Log(fmt.Sprintf("review is waiting on answers to %d question(s)", len(questionFindings)))
+		if conv.QuestionsIncomplete {
+			sctx.Log("review parked: the reviewer's question history could not be read in full, so answers are refused and this gate needs a human decision")
+		} else {
+			sctx.Log(fmt.Sprintf("review is waiting on answers to %d question(s)", len(conv.Open())))
+		}
 		findings.Items = append(findings.Items, questionFindings...)
 	}
 
