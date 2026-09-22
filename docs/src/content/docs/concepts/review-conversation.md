@@ -139,10 +139,10 @@ later re-ask of that `id`. That binding has to come from the writer: at read
 time two asks and two answers look identical whether the second answer corrects
 the first ask or answers the re-ask, and that ambiguity is the whole defect.
 
-The count the stamp is taken against is every accepted question line for that
-`id` in the file, so which lines the reader retains never shifts it: the reader
-counts the leading lines its line bound discards rather than renumbering the
-survivors.
+The ask ordinal is counted over the question lines the load retained, and
+retention can no longer shift it: dropping a question line makes the whole
+question history incomplete, so nothing in that load settles and no answer is
+ever bound to a renumbered ask.
 
 Both of the reader's bounds then fail the same way, and this is the rule that
 matters most in the file: if `questions.ndjson` could not be read IN FULL,
@@ -181,15 +181,19 @@ append-only history stayed incomplete.
 
 A dropped ANSWER line is deliberately not the same: an answer that scrolled out
 of the window cannot settle anything either way, and the ask it belonged to
-simply stays open, which is the safe direction. The answer
-path refuses there rather than appending: an answer stamped against a history
-that is not all there could never close its question, so recording it would
-leave the gate parked forever with its operator told they had answered. The
-refusal names that cause, distinctly from a conversation that cannot be read at
-all, and writes nothing. A read that
-FAILS is not an empty conversation either: the review step stops, exactly as the
-answer path refuses, because a swallowed failure would complete a review with no
-open question rather than parking on the ones that were asked.
+simply stays open, which is the safe direction - and an answer may still be
+appended for it.
+
+Where the QUESTION history could not be read to the end, the answer path
+refuses rather than appending: an answer stamped against a history that is not
+all there could never close its question, so recording it would leave the gate
+parked forever with its operator told they had answered. The refusal names that
+cause, distinctly from a conversation that cannot be read at all, and writes
+nothing.
+
+A read that FAILS is not an empty conversation either: the review step stops,
+exactly as the answer path refuses, because a swallowed failure would complete a
+review with no open question rather than parking on the ones that were asked.
 
 An answer for an unknown or retracted `id` is recorded and ignored, never an
 error: the writer may be racing a retraction it has not read yet. Ignored is
@@ -414,11 +418,21 @@ and a new run starts. The superseded run's per-round fix summaries would be lost
 `uncertifiedRoundHistoryPromptSection` covers only *pipeline-authored* commits a
 previous run left uncertified.
 
-The initial review of a run therefore also receives the most recent superseded
-run's review rounds on the same branch, as a **Previous run's review rounds**
-section. It is labelled as author-fixed and deliberately carries no fix-round
-provenance clause: the code under review is the author's, reviewed under the
-ordinary standard, not pipeline-authored code needing the adversarial framing.
+The initial review of a run therefore also receives the most recent *other*
+run's review rounds on the same branch - the selector is deliberately
+unfiltered by that run's status, so it renders for an ordinary second push onto
+a branch whose previous run completed as well as for a supersede - as a
+**Previous run's review rounds** section. It deliberately carries no fix-round provenance clause, and it does not
+characterise the authorship of those commits in either direction. The
+adversarial framing is only ever *added*, by `fixRoundProvenanceClause`, which
+returns the empty string when neither `sctx.Fixing` nor an uncertified range
+applies - so nothing in the prompt applies that standard by default and this
+section has nothing to correct. Claiming the commits are the author's own would
+be worse than silence: the selector is unfiltered by run status on purpose, so
+the previous run may well have taken a pipeline fix round that completed, which
+certifies its range and leaves `UncertifiedSourceRunID` empty, so the skip in
+`BindPreviousRunReviewRounds` does not fire and the fixer's commits are inside
+this run's own `base..head` scope.
 
 ## No round cap
 

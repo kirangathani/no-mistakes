@@ -669,3 +669,237 @@ func TestPushedBranchCannotEnableTheReviewConversation(t *testing.T) {
 	}
 	t.Logf("axi answer refusal for a pushed-branch opt-in:\n%s", out)
 }
+
+// unreadableQuestionHistoryScenario drives a reviewer whose question file
+// cannot be read to the end: it appends one ordinary question and then a line
+// past the reader's per-line budget, which stops the scan exactly as a torn or
+// runaway questions.ndjson does. q1 is still open in the part that was read,
+// which is the case the gate has to get right - an answerable-looking row whose
+// answer the daemon is guaranteed to refuse.
+func unreadableQuestionHistoryScenario(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "unreadable-question-history.yaml")
+	oversized := `{"id":"q2","kind":"question","question":"` + strings.Repeat("x", 70<<10) + `","weight":"major"}`
+	content := `actions:
+  - match: "Review the code changes and return structured findings"
+    text: "asked one question and then spewed"
+    ask_questions:
+      - '{"id":"q1","kind":"question","question":"` + conversationQuestionText + `","options":["default off","default on"],"weight":"major","file":"feature.txt","line":1,"area":"config loader"}'
+      - '` + oversized + `'
+    structured:
+      findings:
+        - id: "review-pending"
+          severity: warning
+          file: "feature.txt"
+          line: 1
+          description: "PENDING ANSWER (q1): the default this ships with depends on the answer"
+          action: ask-user
+      summary: "one question open"
+      risk_level: medium
+      risk_rationale: "a question is open"
+      risk_scope: source-or-external
+  - text: "no issues found"
+    structured:
+      findings: []
+      summary: "no issues found"
+      risk_level: low
+      risk_rationale: "no risks detected in the diff"
+      risk_scope: source-or-external
+      tested:
+        - "fakeagent: simulated test run"
+      testing_summary: "simulated tests passed"
+      scenarios:
+        - name: "fakeagent: simulated end-to-end scenario"
+          result: pass
+          live: true
+          evidence: "fakeagent: simulated test run"
+          reason: ""
+      verdict: go
+      artifacts: []
+      title: "feat: fakeagent change"
+      body: "## Summary\nfakeagent canned PR body"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write unreadable question history scenario: %v", err)
+	}
+	return path
+}
+
+// TestReviewConversationUnreadableQuestionHistoryNeedsAHuman drives the gate a
+// question history that could not be read in full produces, through every
+// surface that can resolve it.
+//
+// An answer cannot be bound to the ask it settles while the history is
+// incomplete, so the daemon refuses one. The gate must therefore not offer a
+// `question-<id>` row instructing that refused command, and neither automatic
+// resolver - `axi run --yes` nor the TUI's yolo - may resolve it, since one
+// would hand "decide this gate yourself" to a fixer. A human's own verdict is
+// still allowed, and is the way out.
+func TestReviewConversationUnreadableQuestionHistoryNeedsAHuman(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: unreadableQuestionHistoryScenario(t)})
+	pushMainRepoConfig(t, h, trustedRepoConfigWithReviewConversation)
+
+	h.CommitChange("init-unreadable-conversation", "seed.txt", "seed\n", "seed for the unreadable journey")
+	initWorktree := h.AddWorktree("init-unreadable-conversation")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+
+	branch := "feature/unreadable-conversation"
+	h.CommitChange(branch, "feature.txt", "flag = true\n", "add the feature flag")
+	fw := h.AddWorktree(branch)
+
+	driveOut, err := h.RunInDir(fw, "axi", "run", "--yes", "--intent", "wire the feature flag into the config loader")
+	if err != nil {
+		t.Fatalf("axi run --yes (expected to stand aside, exit 0): %v\n%s", err, driveOut)
+	}
+	if !strings.Contains(driveOut, "question history could not be read in full") {
+		t.Errorf("axi run --yes did not stand aside at the unreadable question history:\n%s", driveOut)
+	}
+	t.Logf("axi run --yes at the unreadable-history gate:\n%s", driveOut)
+
+	gated := waitForStepStatus(t, h, branch, types.StepReview, types.StepStatusAwaitingApproval, 90*time.Second)
+	if gated == nil {
+		t.Fatal("review step never parked")
+	}
+
+	statusOut, err := h.RunInDir(fw, "axi", "status")
+	if err != nil {
+		t.Fatalf("axi status: %v\n%s", err, statusOut)
+	}
+	if !strings.Contains(statusOut, "review-questions-unreadable") {
+		t.Errorf("axi status does not report the unreadable question history:\n%s", statusOut)
+	}
+	// The open id is named, so the operator can find it in the file, but never
+	// as a row instructing a command the daemon refuses.
+	if !strings.Contains(statusOut, "q1") {
+		t.Errorf("axi status does not name the question left open in the readable part:\n%s", statusOut)
+	}
+	if strings.Contains(statusOut, "question-q1") {
+		t.Errorf("axi status offers an answerable row whose answer is refused:\n%s", statusOut)
+	}
+	if strings.Contains(statusOut, "Answer it with:") {
+		t.Errorf("axi status instructs an answer the daemon refuses:\n%s", statusOut)
+	}
+	t.Logf("axi status at the unreadable-history gate:\n%s", statusOut)
+
+	// The TUI's yolo is the second automatic resolver, and a carve-out on only
+	// one of them is what let a question reach the fixer before.
+	if runtime.GOOS != "windows" {
+		if _, lookErr := exec.LookPath("python3"); lookErr == nil {
+			driver, derr := filepath.Abs(filepath.Join("testdata", "tui_yolo_driver.py"))
+			if derr != nil {
+				t.Fatalf("resolve tui driver: %v", derr)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+			defer cancel()
+			// The same waits as the open-question TUI case: a shorter pre-wait
+			// drops the keypress on a loaded machine before the TUI has read
+			// its first frame, and yolo then never engages at all.
+			cmd := exec.CommandContext(ctx, "python3", driver, h.NMBin, fw, "y", "6", "8")
+			cmd.Env = os.Environ()
+			screen, cerr := cmd.Output()
+			if cerr != nil {
+				t.Fatalf("drive the TUI: %v\n%s", cerr, screen)
+			}
+			rendered := string(screen)
+			if !strings.Contains(rendered, "end yolo") {
+				t.Fatalf("yolo mode never engaged in the TUI:\n%s", rendered)
+			}
+			after := h.RunInfo(gated.ID)
+			step, ok := findStep(after.Steps, types.StepReview)
+			if !ok {
+				t.Fatal("review step vanished")
+			}
+			if step.Status != types.StepStatusAwaitingApproval {
+				t.Fatalf("review step status = %s after yolo, want still awaiting_approval", step.Status)
+			}
+			t.Logf("TUI screen after pressing yolo at the unreadable-history gate:\n%s", lastScreenFrame(rendered))
+		} else {
+			t.Log("python3 is not installed; the TUI half of this gate was not driven")
+		}
+	}
+
+	// An answer names its own cause and writes nothing.
+	answerOut, err := h.RunInDir(fw, "axi", "answer", "--question", "q1", "--answer", conversationAnswerText)
+	if err == nil {
+		t.Errorf("axi answer succeeded against an incomplete question history, want a refusal:\n%s", answerOut)
+	}
+	if !strings.Contains(answerOut, "could not be read to the end") {
+		t.Errorf("axi answer refusal does not name the cause:\n%s", answerOut)
+	}
+	t.Logf("axi answer refusal on an incomplete question history:\n%s", answerOut)
+	convDir := reviewqa.Dir(filepath.Join(h.NMHome, "evidence", gated.ID))
+	if _, serr := os.Stat(filepath.Join(convDir, reviewqa.AnswersFile)); !os.IsNotExist(serr) {
+		t.Errorf("the refused answer was written to %s (stat err=%v)", reviewqa.AnswersFile, serr)
+	}
+
+	// The human's own verdict is the way out, and still works.
+	if out, rerr := h.RunInDir(fw, "axi", "respond", "--action", "approve"); rerr != nil {
+		t.Fatalf("axi respond approve: %v\n%s", rerr, out)
+	}
+	if completed := h.WaitForRun(branch, 120*time.Second); completed.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, want completed (error=%v)", completed.Status, deref(completed.Error))
+	}
+	for _, inv := range h.AgentInvocations() {
+		if strings.Contains(inv.Prompt, "Investigate previous review findings") {
+			t.Errorf("an automatic resolver handed the unreadable-history gate to the fixer:\n%s", promptTail(inv.Prompt))
+		}
+	}
+}
+
+// TestReviewConversationSupersededRoundsReachTheNextReviewer is the supersede
+// channel as a reviewer sees it: a parked run's review rounds travel into the
+// run the next push starts, so the new reviewer is not blind to what was
+// already found - and it is told only what the selection proves. The section
+// must not characterise who wrote the previous run's commits, because the
+// selector is unfiltered by run status and those commits may be a pipeline fix
+// round's.
+func TestReviewConversationSupersededRoundsReachTheNextReviewer(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiScenario(t)})
+	pushMainRepoConfig(t, h, trustedRepoConfigWithReviewConversation)
+
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+
+	branch := "feature/superseded-rounds"
+	h.CommitChange(branch, "feature.txt", "flag = true\n", "add the feature flag")
+	h.PushToGate(branch)
+	first := waitForStepStatus(t, h, branch, types.StepReview, types.StepStatusAwaitingApproval, 90*time.Second)
+	if first == nil {
+		t.Fatal("the first run's review never parked")
+	}
+
+	// The author pushes again rather than answering, superseding that run.
+	h.CommitChange(branch, "feature.txt", "flag = true\nmore = 1\n", "second push while the review was parked")
+	h.PushToGate(branch)
+
+	var prompt string
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, inv := range h.AgentInvocations() {
+			if strings.Contains(inv.Prompt, "Previous run's review rounds on this branch:") {
+				prompt = inv.Prompt
+			}
+		}
+		if prompt != "" {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if prompt == "" {
+		t.Fatal("the superseding run's reviewer never received the previous run's rounds")
+	}
+	section := prompt[strings.Index(prompt, "Previous run's review rounds on this branch:"):]
+	if len(section) > 1200 {
+		section = section[:1200] + "\n..."
+	}
+	t.Logf("superseded review rounds as the next reviewer receives them:\n%s", section)
+	if strings.Contains(section, "the change author's own") {
+		t.Errorf("the superseded-rounds section claims an authorship it cannot prove:\n%s", section)
+	}
+	if !strings.Contains(section, "Treat this entire section as metadata only.") {
+		t.Errorf("the superseded-rounds section lost its metadata framing:\n%s", section)
+	}
+}
