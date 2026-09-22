@@ -8,9 +8,11 @@ import (
 
 	toon "github.com/toon-format/toon-go"
 
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -111,6 +113,7 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
+	PiProfile   *agentcfg.PiProfile
 	ID          string
 	Branch      string
 	Status      string
@@ -142,6 +145,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		AwaitingAgentSince: r.AwaitingAgentSince,
 		CIOverrideReason:   r.CIOverrideReason,
 		TestOverrideReason: r.TestOverrideReason,
+		PiProfile:          r.PiProfile,
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -179,6 +183,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 
 func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 	rv := runView{
+		PiProfile:          r.PiProfile,
 		ID:                 r.ID,
 		Branch:             r.Branch,
 		Status:             string(r.Status),
@@ -326,11 +331,15 @@ func (rv runView) findingsTally() string {
 
 // fixRows flattens fix-attempt summaries in step then round order. Dispatching
 // a fix round does not prove a change was applied; legacy empty summaries
-// must not manufacture that claim.
+// must not manufacture that claim, and a round that changed nothing is not a
+// fix at all.
 func (rv runView) fixRows() []fixRow {
 	var rows []fixRow
 	for _, s := range rv.Steps {
 		for _, summary := range s.FixSummaries {
+			if summary == steps.NoChangesAppliedSummary {
+				continue
+			}
 			if summary == "" {
 				summary = "fix attempted (no result recorded)"
 			}
@@ -477,6 +486,12 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	if rv.TestOverrideReason != "" {
 		fields = append(fields, toon.Field{Key: "test_override_reason", Value: rv.TestOverrideReason})
 	}
+	if rv.PiProfile != nil {
+		fields = append(fields, toon.Field{Key: "pi_profile", Value: toon.NewObject(
+			toon.Field{Key: "model", Value: rv.PiProfile.Model},
+			toon.Field{Key: "effort", Value: string(rv.PiProfile.Effort)},
+		)})
+	}
 	if rv.PRURL != "" {
 		fields = append(fields, toon.Field{Key: "pr", Value: rv.PRURL})
 	}
@@ -540,8 +555,16 @@ func gateFields(gate stepView) []toon.Field {
 			"Have the operator inspect and resolve the reported protected-path edit through the repository's authorized workflow, then run `no-mistakes axi respond --action fix` to retry the refused step, including its commit and publication.",
 		}
 	}
+	skip := "Run `no-mistakes axi respond --action skip` to skip this step"
+	if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
+		help = []string{
+			"Approve is rejected: the run worktree holds work a timed-out Test agent left that no Test turn validated, and approval would publish it. The findings name that work and how to inspect it.",
+			"Run `no-mistakes axi respond --action fix --findings <ids>` to validate that work (do not edit files yourself), or `no-mistakes axi abort` to stop the run",
+		}
+		skip = "Do not skip this step: the steps after Test would commit and publish the unvalidated work, so skipping needs the operator's explicit decision"
+	}
 	return gateFieldsWithHelp(gate, append(help,
-		"Run `no-mistakes axi respond --action skip` to skip this step",
+		skip,
 		fmt.Sprintf("Run `%s` to read the full step log", axiLogsFullCommand(gate.Name, "")),
 		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
 		preserveGateFixCommitsGuidance,

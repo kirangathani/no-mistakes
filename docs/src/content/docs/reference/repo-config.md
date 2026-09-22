@@ -174,7 +174,8 @@ Suppress project-level agent settings and instructions for every gate-agent star
 
 This opt-in is intended for agent-orchestration repositories whose `AGENTS.md`, `CLAUDE.md`, or harness-specific project settings would give a validation agent an operator identity and authority that it must not adopt.
 When enabled, no-mistakes suppresses the target checkout's project settings for every agent-driven gate step while preserving user-level agent configuration.
-Codex, Claude, and Pi are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, Claude loads only its user setting source, and Pi runs with `--no-context-files` (preserving a pinned `--no-context-files` or `-nc` spelling).
+Codex, Claude, Pi, and the `acp:omp` target (Oh My Pi over ACP) are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, Claude loads only its user setting source, and Pi runs with `--no-context-files` (preserving a pinned `--no-context-files` or `-nc` spelling).
+`acp:omp` is launched as `omp acp` with a generated `--config` overlay that disables every omp context-file discovery provider (`native`, `claude`, `codex`, `gemini`, `opencode`, `github`, `agents`, `agents-md`, `claude-md`) and mnemopi memory, plus `--no-rules`, `--no-skills`, and `--no-extensions`. omp has no CLI flag to disable context files, and a CLI `--config` overlay is the highest settings layer, so the target repository's own `.omp/config.yml` cannot re-enable a provider the overlay disabled. Memory is disabled because a gate turn that reads the repo's `AGENTS.md` while reviewing could otherwise retain it and a later turn recall it around the provider suppression. Only the default `acp:omp` launch qualifies: an `acp_registry_overrides` entry for `omp` is an opaque custom command and fails closed. Other ACP targets (`acp:<target>`) remain unverified and are refused.
 Grok 1.0.5 still discovers native project instructions and `.grok` project surfaces, so it is not a verified agent for this boundary. A configuration that resolves Grok while this option is enabled therefore fails closed before launch.
 The setting applies to both new and resumed sessions.
 
@@ -285,9 +286,11 @@ Control publication of the **generated `Intent` section**, independently of inte
 | --- | --- |
 | Type | `bool` |
 | Default | `true` (missing or `null` also preserves the default) |
-| Trust | Trusted default branch only, regardless of `allow_repo_commands`; no global setting |
+| Trust | Trusted default branch only, regardless of `allow_repo_commands`; the caller-side counterpart is the global [`intent.publish_intent`](/no-mistakes/reference/global-config/#intent) default and the per-run `axi run --no-publish-intent` flag |
 
 `false` suppresses that section in ordinary drafting, fallback output, and template appendices. It works without `pr.template` and does not otherwise enable template mode. It never removes full intent from review or PR-drafting context, changes evidence/attestation policy, or erases author-written sections named `Intent`. Unconfigured defaults remain unchanged.
+
+A contributor can keep the section off for their own runs without touching this repository policy: `axi run --no-publish-intent` records a tighten-only omission on the run, and an operator can set the global `intent.publish_intent: false` default. Both compose with this field and can only reduce publication: the trusted repository policy is the ceiling, and a caller can never publish intent on a repository whose trusted config disabled it. Neither signal changes what review, test, document, lint, or CI auto-fix prompts receive. The caller-side omission goes one step further than this repository policy: the PR-drafting turns (ordinary narrative, title-only fallback, and repository-template narrative) receive no intent text at all and draft from the diff and commit messages only, so no paraphrase of the withheld intent can reach the public PR. The intent is withheld, never scanned for: there is no output filter.
 
 This is not a privacy filter: generated narrative and other evidence can still contain sensitive information, and LLM drafting is not a confidentiality guarantee. No caller-written public-body override is introduced by this setting.
 
@@ -528,6 +531,7 @@ What that boundary protects is the gate's *declaration*, not the repository file
 
 All configured `commands.*` entries and repository gate commands are scoped to their step.
 After no-mistakes starts one of these commands, it terminates any remaining child processes from that command when the command exits, fails, or the step is cancelled.
+On Windows, cancellation first sends `CTRL_BREAK` to the command's isolated process group and allows up to three seconds for cleanup before forcibly terminating the job. A command that owns external resources should handle its runtime's break signal and exit after cleanup; in Node.js, register a `process.on('SIGBREAK', handler)` listener. If the command does not exit before the window closes, expect forced termination.
 Do not rely on a configured command to leave a background server or watcher running after it returns; keep that service inside the command lifetime or start it outside no-mistakes.
 
 ### ignore_patterns
