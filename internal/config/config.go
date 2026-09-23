@@ -202,12 +202,7 @@ type GlobalConfig struct {
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
 	// RepoConfig means no pushed branch can enable, disable, or resize it.
-	Eval Eval
-	// Jev holds the resolved TypeSafe pre-brief settings (see the Jev type).
-	// Global-only for the same reason as Eval: it decides whether this
-	// machine's review turns consult an external pre-screen service under the
-	// operator's own key, so no pushed branch may enable or steer it.
-	Jev       Jev
+	Eval      Eval
 	Providers ProvidersRaw
 }
 
@@ -241,9 +236,17 @@ type globalConfigRaw struct {
 	Intent                  GlobalIntentRaw            `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
 	Eval                    EvalRaw                    `yaml:"eval"`
-	Jev                     JevRaw                     `yaml:"jev"`
-	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
-	Providers               ProvidersRaw               `yaml:"providers"`
+	// Jev is the retired jev.review_assist pre-brief block. The feature was
+	// removed after the offline trial showed its candidate listing cannot
+	// reach the review findings it is meant to surface. The key stays in the
+	// raw schema as a tombstone ONLY so a global config that still sets one of
+	// the two retired subkeys keeps parsing: the strict decoder would
+	// otherwise reject the whole document as an unknown field. Setting either
+	// key is reported as deprecated at load and has no effect; the resolved
+	// config has no Jev to configure.
+	Jev           retiredJev    `yaml:"jev"`
+	ForgeProfiles ForgeProfiles `yaml:"forge_profiles"`
+	Providers     ProvidersRaw  `yaml:"providers"`
 }
 
 // ForgeProfile selects one isolated provider CLI configuration directory.
@@ -684,10 +687,7 @@ type Config struct {
 	LogLevel              string
 	SessionReuse          bool
 	Eval                  Eval
-	// Jev is global-only by design (see GlobalConfig.Jev); Merge copies it
-	// straight through with no repository override step.
-	Jev      Jev
-	Commands Commands
+	Commands              Commands
 	// Gates are the repository's extra checks, already trusted-only by the
 	// time they reach here (EffectiveRepoConfig sourced them from the trusted
 	// default-branch copy).
@@ -939,30 +939,24 @@ type Eval struct {
 	DiversifiedSize int
 }
 
-// JevRaw is the YAML representation of the TypeSafe review pre-brief
-// settings. Pointer fields distinguish "not set" (nil) from explicit values.
-type JevRaw struct {
-	ReviewAssist *bool `yaml:"review_assist"`
-	// CandidateExcerptBytes bounds the content excerpt attached to each
-	// ranked candidate file. Nil means unset (path-only candidates).
-	CandidateExcerptBytes *int `yaml:"candidate_excerpt_bytes"`
+// retiredJev names exactly the two retired jev subkeys so a global config
+// that still sets one keeps parsing under the strict known-fields rule. Both
+// are pointers so a set key is distinguishable from an absent one and can be
+// reported as deprecated at load time; neither configures anything. Any other
+// subkey under jev: is rejected like any unknown field.
+type retiredJev struct {
+	ReviewAssist          *bool `yaml:"review_assist"`
+	CandidateExcerptBytes *int  `yaml:"candidate_excerpt_bytes"`
 }
 
-// Jev is the resolved TypeSafe pre-brief config. ReviewAssist opts review
-// turns into one batched Jev evaluation that ranks surrounding context as
-// advisory prompt input (issue #1055). It never
-// changes what a review covers or who validates it, and every failure of the
-// assist falls back to the same cold review that runs with it off. The API
-// key is read from the daemon's TYPESAFE_API_KEY environment variable at turn
-// time, never from this document.
-type Jev struct {
-	ReviewAssist bool
-	// CandidateExcerptBytes caps the content excerpt attached to each
-	// ranked candidate file, in bytes. 0 is today's path-only behaviour:
-	// no content of an unchanged file leaves the machine. A positive value
-	// opts into sending a bounded leading slice of each candidate file to
-	// the TypeSafe API as part of the pre-brief state.
-	CandidateExcerptBytes int
+// warnRetiredJev reports each set retired jev key once at load time.
+func warnRetiredJev(raw retiredJev) {
+	if raw.ReviewAssist != nil {
+		slog.Warn("jev.review_assist is deprecated: the jev review pre-brief was removed and this setting has no effect")
+	}
+	if raw.CandidateExcerptBytes != nil {
+		slog.Warn("jev.candidate_excerpt_bytes is deprecated: the jev review pre-brief was removed and this setting has no effect")
+	}
 }
 
 // IntentRaw is the YAML representation of user-intent extraction settings.
@@ -1083,10 +1077,12 @@ const defaultConfigYAML = `# no-mistakes global configuration
 
 # Agent to use for code generation. This may also be an ordered fallback list,
 # for example: agent: [codex, grok]
-# Options: auto, claude, codex, grok, rovodev, opencode, pi, copilot, cursor, acp:<target>
+# Options: auto, claude, codex, grok, rovodev, opencode, pi, copilot, cursor, devin, acp:<target>
 # "auto" detects the first available native agent or ACP alias on your system
 # "cursor" is an ACP alias for acp:cursor using cursor-agent acp via acpx
 # "acp:cursor" also uses that Cursor default command
+# "devin" is an ACP alias for acp:devin using devin acp via acpx
+# "acp:devin" also uses that Devin default command
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
 
@@ -1100,6 +1096,7 @@ forgejo_axi_path: forgejo-axi
 # acp_registry_overrides:
 #   local-gemini: node /opt/mock-acp-agent.mjs
 #   cursor: cursor-agent acp
+#   devin: devin acp
 
 # Maximum time the CI monitor babysits an open PR with no base-branch movement
 # before giving up. The monitor watches CI and auto-rebases when the base branch
@@ -1167,7 +1164,7 @@ log_level: info
 # --model/--effort for claude and copilot, -m plus -c model_reasoning_effort for
 # codex, --model/--reasoning-effort for grok, --model/--thinking for pi, the
 # session-message body for opencode (its model needs the provider/model form),
-# and acpx --model for cursor and acp:<target>. Effort is one of
+# and acpx --model for cursor, devin, and acp:<target>. Effort is one of
 # minimal, low, medium, high, xhigh, max; a harness rejects any level it does not
 # implement. rovodev and antigravity expose no mechanism no-mistakes can set, so
 # agent_config is refused for them; agent_args_override remains an escape hatch
@@ -1532,7 +1529,7 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 		return resolved, err == nil, "auto", err
 	}
 	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
-		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, grok, rovodev, opencode, pi, copilot, cursor, antigravity, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, grok, rovodev, opencode, pi, copilot, cursor, devin, antigravity, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
 	if isACPAgent(name) {
 		available, bins, err := c.acpAvailable(name, lookPath)
@@ -1692,10 +1689,18 @@ func (c *Config) AgentProfile() agentcfg.Profile {
 }
 
 func (c *Config) AgentProfileFor(name types.AgentName) agentcfg.Profile {
-	if c.AgentConfig == nil {
-		return agentcfg.Profile{}
+	if profile, ok := c.AgentConfig[string(name)]; ok {
+		return profile
 	}
-	return c.AgentConfig[string(name)]
+	if alias, ok := types.ACPAliasFor(name); ok {
+		return c.AgentConfig["acp:"+alias.Target]
+	}
+	if target, ok := types.ACPTargetFor(name); ok {
+		if alias, ok := types.ACPAliasForTarget(target); ok {
+			return c.AgentConfig[string(alias.Name)]
+		}
+	}
+	return agentcfg.Profile{}
 }
 
 // agentProfileRaw is the on-disk YAML shape of one agent_config entry. Effort
@@ -1715,7 +1720,7 @@ func parseAgentConfig(raw map[string]agentProfileRaw) (map[string]agentcfg.Profi
 	for name, entry := range raw {
 		agentName := types.AgentName(name)
 		if !agentcfg.Known(agentName) {
-			return nil, fmt.Errorf("invalid agent name in agent_config: %q (valid: %s, cursor, acp:<target>)", name, strings.Join(agentNamesText(agentcfg.Agents()), ", "))
+			return nil, fmt.Errorf("invalid agent name in agent_config: %q (valid: %s, cursor, devin, acp:<target>)", name, strings.Join(agentNamesText(agentcfg.Agents()), ", "))
 		}
 		effort, err := agentcfg.ParseEffort(entry.Effort)
 		if err != nil {
@@ -1973,7 +1978,6 @@ func DefaultGlobalConfig() *GlobalConfig {
 		LogLevel:                "info",
 		SessionReuse:            true,
 		Eval:                    evalDefaults(),
-		Jev:                     Jev{},
 	}
 }
 
@@ -2146,9 +2150,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateRebaseRaw(raw.Rebase); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
-	if err := validateJevRaw(raw.Jev); err != nil {
-		return nil, fmt.Errorf("parse global config: %w", err)
-	}
+	warnRetiredJev(raw.Jev)
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -2282,7 +2284,6 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Test = raw.Test
 	cfg.Providers = raw.Providers
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
-	applyJevOverrides(&cfg.Jev, &raw.Jev)
 
 	return cfg, nil
 }
@@ -2834,27 +2835,6 @@ func applyEvalOverrides(dst *Eval, src *EvalRaw) {
 	}
 }
 
-// applyJevOverrides applies non-nil raw values onto resolved defaults.
-func applyJevOverrides(dst *Jev, src *JevRaw) {
-	if src.ReviewAssist != nil {
-		dst.ReviewAssist = *src.ReviewAssist
-	}
-	if src.CandidateExcerptBytes != nil {
-		dst.CandidateExcerptBytes = *src.CandidateExcerptBytes
-	}
-}
-
-// validateJevRaw fails the config closed on a negative
-// jev.candidate_excerpt_bytes. A negative byte budget has no defensible
-// meaning here - it is neither "send nothing" (0) nor a bound - so
-// surfacing the typo beats guessing which one was meant.
-func validateJevRaw(raw JevRaw) error {
-	if raw.CandidateExcerptBytes != nil && *raw.CandidateExcerptBytes < 0 {
-		return fmt.Errorf("jev.candidate_excerpt_bytes must be 0 (path-only candidates) or greater, got %d", *raw.CandidateExcerptBytes)
-	}
-	return nil
-}
-
 // validateEvalRaw fails the config closed on a negative eval.max_cases. A
 // negative cap has no defensible meaning here - it is neither "keep everything"
 // (0) nor a bound - so surfacing the typo beats guessing which one was meant.
@@ -3127,9 +3107,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		SessionReuse:          global.SessionReuse,
 		// Eval is global-only by design (see GlobalConfig.Eval), so it is
 		// copied straight through with no repository override step.
-		Eval: global.Eval,
-		// Jev is global-only for the same reason as Eval.
-		Jev:            global.Jev,
+		Eval:           global.Eval,
 		Commands:       repo.Commands,
 		Gates:          copyGates(repo.Gates),
 		IgnorePatterns: repo.IgnorePatterns,
