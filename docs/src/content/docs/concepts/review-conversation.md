@@ -341,33 +341,36 @@ An answer settles only the question it answers. The finalize prompt says so
 explicitly: an answer of "that is intended" closes the question it names and
 gives the reviewer no licence to soften a finding it did not ask about.
 
-### The finalize turn is a full review pass
+### The finalize turn re-adjudicates what it carried in
 
 That matters for the outstanding finding set. A review finding stays outstanding
 until a later round positively verifies it - covers its file in `reviewed_paths`
 and stops reporting it - and a fix round earns that right for the findings it
-dispatched to the fixer. An answer round dispatches nothing, so the findings it
-carries in are what it may verify.
+dispatched to the fixer.
 
-This is deliberate, and it rests on what a finalize turn actually is: its prompt
-is the whole review prompt plus the answers, over the same head, so it is a
-review pass and not a narrow re-read of one question. Its silence about a
-finding is worth exactly what any rereview's silence is worth, and the coverage
-rule still applies unchanged - a finding leaves only if that turn named its file
-and did not report it.
+An answer round does not earn it, and is not given it. A fix CHANGES the code,
+so a rereview that names the file and no longer reports the defect is evidence
+the change worked. An answer changes nothing but what the reviewer knows, so the
+same silence proves nothing about any particular finding: a finalize turn that
+covered a file used to take every carried finding in it, including ones the
+answers had no bearing on, and the gate could complete having silently dropped a
+defect nobody fixed, selected or approved.
 
-The reason it must be allowed at all is the protocol's own instruction to prefix
-a finding contingent on an open question with `PENDING ANSWER (<id>)`. Such a
-finding is routine in a round that asks a question, and an answer frequently
-disproves it. Without this the reviewer could withdraw it and the carry-forward
-would re-inject it anyway, still pointing the operator at a question that is
-already settled, leaving no way to clear it but approving over it.
+So an answer round retracts by NAMING. The carried set rides the prompt, the
+turn walks it item by item with the answers in hand, and each finding either
+appears again in `findings` because it still holds, or appears in
+`withdrawn_findings` with the reason the answers disproved it. Anything the turn
+leaves out of both is KEPT. Silence never retracts a finding.
 
-The cost is stated rather than hidden: an answer round can also clear an
-unrelated finding that the same turn covered and did not re-report. For that to
-lose something real, the reviewer has to re-read unchanged code, name the file,
-and decline to report a defect that is still there - a reviewer contradicting
-itself rather than an answer overriding a verdict.
+This is what the protocol's `PENDING ANSWER (<id>)` prefix needs. Such a finding
+is routine in a round that asks a question, and an answer frequently disproves
+it; without a retraction channel the carry-forward re-injects it anyway, still
+pointing the operator at a question that is already settled, with no way to
+clear it but approving over it.
+
+The coverage rule itself is untouched for every other round type, and a
+withdrawal is a claim the reviewer has to make in its own words, which is
+reviewable after the fact in a way silence never was.
 
 ## What is persisted, and where the next cold reviewer reads it
 

@@ -443,7 +443,9 @@ Risk assessment (after listing all findings):
 		// different matter and stays: the turn itself may have written to the
 		// conversation.
 		if answers := reviewAnswersPromptSection(asked); answers != "" {
-			turnPrompt = prompt + answers
+			// The carried findings ride immediately after the answers, so the
+			// turn re-adjudicates what it already judged before it carries on.
+			turnPrompt = prompt + answers + carriedFindingsPromptSection(sctx.CarriedFindings)
 			how := "resuming"
 			if !resumingAnswers {
 				how = "replaying"
@@ -524,12 +526,13 @@ Risk assessment (after listing all findings):
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-		NeedsApproval:   needsApproval,
-		AutoFixable:     len(findings.Items) > 0,
-		Findings:        string(findingsJSON),
-		ReviewedPaths:   findings.ReviewedPaths,
-		ReviewablePaths: reviewable,
-		FixSummary:      fixSummary,
+		NeedsApproval:       needsApproval,
+		AutoFixable:         len(findings.Items) > 0,
+		Findings:            string(findingsJSON),
+		ReviewedPaths:       findings.ReviewedPaths,
+		WithdrawnFindingIDs: withdrawnFindingIDs(findings),
+		ReviewablePaths:     reviewable,
+		FixSummary:          fixSummary,
 	})
 }
 
@@ -750,4 +753,20 @@ func reviewAgentError(ctx context.Context, timeout time.Duration, prefix string,
 		return fmt.Errorf("%s reached its absolute wall-clock limit after %s: %w", prefix, timeout, err)
 	}
 	return fmt.Errorf("%s: %w", prefix, err)
+}
+
+// withdrawnFindingIDs is the answer round's retraction list, reduced to the ids
+// the executor removes. A blank id is dropped: an entry that names nothing
+// cannot retract anything, and letting it through would clear on a typo.
+func withdrawnFindingIDs(findings Findings) []string {
+	if len(findings.WithdrawnFindings) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(findings.WithdrawnFindings))
+	for _, w := range findings.WithdrawnFindings {
+		if id := strings.TrimSpace(w.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }

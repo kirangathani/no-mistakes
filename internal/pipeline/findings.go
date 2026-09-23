@@ -832,3 +832,52 @@ func dropReviewQuestionFindingsJSON(raw string) string {
 	}
 	return encoded
 }
+
+// dropWithdrawnFindingsJSON removes the findings an answer round explicitly
+// retracted, by the ids it named.
+//
+// This is how a carried finding leaves the outstanding set on an ANSWER round,
+// and it replaces clearing-by-coverage there. The coverage rule stays exactly
+// as it is for fix rounds: a fix CHANGES the code, so a rereview that names the
+// file and stops reporting the defect is evidence the change worked. An answer
+// changes nothing but what the reviewer knows, so the same silence proves
+// nothing - it used to clear any carried finding whose file the finalize turn
+// happened to cover, including one the answer had no bearing on. Requiring the
+// turn to name what it retracts makes the retraction its own claim.
+func dropWithdrawnFindingsJSON(raw string, withdrawnIDs []string) string {
+	if raw == "" || len(withdrawnIDs) == 0 {
+		return raw
+	}
+	withdrawn := make(map[string]bool, len(withdrawnIDs))
+	for _, id := range withdrawnIDs {
+		if id != "" {
+			withdrawn[id] = true
+		}
+	}
+	if len(withdrawn) == 0 {
+		return raw
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return raw
+	}
+	kept := make([]types.Finding, 0, len(findings.Items))
+	for _, item := range findings.Items {
+		if withdrawn[item.ID] {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(kept) == len(findings.Items) {
+		return raw
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	findings.Items = kept
+	encoded, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}

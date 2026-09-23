@@ -44,8 +44,12 @@ type StepContext struct {
 	// combination is reachable - not to forbid it.
 	FinalizingAnswers     bool
 	ReviewStartingHeadSHA string
-	PreviousFindings      string // JSON findings selected for the current fix round
-	DeferredFindings      string // JSON findings left unselected when the current fix round began
+	// CarriedFindings is the whole outstanding set an ANSWER round carries in,
+	// so the finalize turn can re-adjudicate each one by id. Empty on every
+	// other round type.
+	CarriedFindings  string
+	PreviousFindings string // JSON findings selected for the current fix round
+	DeferredFindings string // JSON findings left unselected when the current fix round began
 	// StepResultID is the DB row ID of the current step's step_results record.
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string
@@ -139,11 +143,15 @@ type StepOutcome struct {
 	// ReviewablePaths is the trusted changed-file set this review round can
 	// certify. It is computed from the diff, not supplied by the agent.
 	ReviewablePaths []string
-	ExitCode        int    // process exit code (0 = success)
-	PRURL           string // PR/MR URL if this step created or found one
-	Skipped         bool   // mark the step as skipped without failing the run
-	SkipReason      string // automatic PR/CI skip cause; explicit per-run skips leave it empty
-	SkipRemaining   bool   // skip all subsequent steps (e.g. empty diff after rebase)
+	// WithdrawnFindingIDs is an answer round's explicit retraction list: the
+	// carried findings the turn says no longer hold. It is the ONLY way a
+	// carried finding leaves the outstanding set on an answer round.
+	WithdrawnFindingIDs []string
+	ExitCode            int    // process exit code (0 = success)
+	PRURL               string // PR/MR URL if this step created or found one
+	Skipped             bool   // mark the step as skipped without failing the run
+	SkipReason          string // automatic PR/CI skip cause; explicit per-run skips leave it empty
+	SkipRemaining       bool   // skip all subsequent steps (e.g. empty diff after rebase)
 	// RestartFrom asks the executor to re-run validation from this earlier step.
 	// CI repairs use it when policy requires revalidation or continuity cannot be
 	// proven, sending the new local head back through review before push.

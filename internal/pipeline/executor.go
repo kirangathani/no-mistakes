@@ -973,23 +973,19 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	if carryFindings {
 		outstandingFindings = state.outstandingFindings
 		pendingVerificationIDs = append([]string(nil), state.selectedOutstandingIDs...)
-		if state.answering {
-			// An answer round is a round type the append-only set was not
-			// written for. A fix round earns its pending-verification entries
-			// when a selection is DISPATCHED to the fixer; an answer dispatches
-			// nothing, so without this the finalize turn's coverage record can
-			// certify nothing and a finding the answer itself disproved is
-			// re-injected verbatim - still carrying its "PENDING ANSWER (<id>)"
-			// prefix, still pointing the operator at a question that is now
-			// settled, and removable only by approving over it.
-			//
-			// So the carried set is what this round may verify. The rule itself
-			// is untouched: a finding still leaves only on a positive coverage
-			// record that also stops reporting it. This only admits that the
-			// finalize turn, which re-reads the same head with the answers in
-			// hand, is a rereview of what it carried in.
-			pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(outstandingFindings))
-		}
+		// An answer round is a round type the append-only set was not written
+		// for, and it does NOT earn pending-verification entries. A fix round
+		// earns those when a selection is DISPATCHED to the fixer, because the
+		// code then changed and a rereview that covers the file and stops
+		// reporting the defect is evidence the change worked. An answer changes
+		// nothing but what the reviewer knows, so coverage silence proves
+		// nothing about a finding - seeding the carried set here let a finalize
+		// turn clear any carried finding whose file it happened to cover,
+		// including one the answers had no bearing on.
+		//
+		// Instead the carried set rides the PROMPT, and the turn re-adjudicates
+		// it item by item: a finding it does not name in withdrawn_findings is
+		// kept. See dropWithdrawnFindingsJSON.
 	}
 
 	stepAgent := e.agent
@@ -1053,6 +1049,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Fixing:            state.fixing,
 		SkipFixExecution:  state.skipFixExecution,
 		FinalizingAnswers: state.answering,
+		CarriedFindings:   answerRoundCarriedFindings(state.answering, outstandingFindings),
 		PreviousFindings:  state.previousFindings,
 		DeferredFindings:  state.deferredFindings,
 		Log:               writeLog,
@@ -1165,6 +1162,9 @@ rounds:
 			// that has nothing to do with it.
 			verificationFindings := dropReviewQuestionFindingsJSON(roundFindings)
 			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
+			// An answer round retracts by naming ids, never by silence.
+			outstandingFindings = dropWithdrawnFindingsJSON(outstandingFindings, outcome.WithdrawnFindingIDs)
+			selectedOutstandingIDs = retainFindingIDs(outstandingFindings, selectedOutstandingIDs)
 			outstandingFindings = resolveVerifiedFindingsJSON(outstandingFindings, pendingVerificationIDs, outcome.ReviewedPaths, outcome.ReviewablePaths, verificationFindings)
 			pendingVerificationIDs = retainFindingIDs(outstandingFindings, pendingVerificationIDs)
 			selectedOutstandingIDs = retainFindingIDs(outstandingFindings, selectedOutstandingIDs)
@@ -1437,17 +1437,13 @@ rounds:
 					slog.Warn("failed to return step status to running", "step", stepName, "error", dbErr)
 				}
 				sctx.FinalizingAnswers = true
-				// What this round may verify is what it carries in. A fix round
-				// earns its pending-verification entries when a selection is
-				// dispatched to the fixer; an answer dispatches nothing, so
-				// without this the finalize turn's coverage record certifies
-				// nothing and a finding the answer itself disproved is
-				// re-injected verbatim - still carrying its "PENDING ANSWER
-				// (<id>)" prefix and pointing at a settled question. The
-				// verification rule is unchanged: a finding still leaves only
-				// on a positive coverage record that also stops reporting it.
+				// The carried set rides the PROMPT so the finalize turn
+				// re-adjudicates it, exactly as on the live path; it earns no
+				// pending-verification entries, because an answer dispatches no
+				// fix and coverage silence therefore proves nothing about a
+				// finding. See dropWithdrawnFindingsJSON.
 				if carryFindings {
-					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(outstandingFindings))
+					sctx.CarriedFindings = outstandingFindings
 				}
 				// A question can be asked by a rereview inside a fix round too.
 				// That round's fixes are already applied and committed, so the
@@ -2207,4 +2203,13 @@ func (e *Executor) ReviewConversationAnswerDir(runID string) string {
 		return ""
 	}
 	return dir
+}
+
+// answerRoundCarriedFindings is the outstanding set a finalize turn must
+// re-adjudicate, and empty on every other round type.
+func answerRoundCarriedFindings(answering bool, outstanding string) string {
+	if !answering {
+		return ""
+	}
+	return outstanding
 }

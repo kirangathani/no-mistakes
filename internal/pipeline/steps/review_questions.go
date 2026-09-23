@@ -156,6 +156,43 @@ func reviewAnswersPromptSection(conv reviewqa.Conversation) string {
 	return b.String()
 }
 
+// carriedFindingsPromptSection makes an answer round re-adjudicate what it
+// carried in, instead of clearing a finding by staying silent about it.
+//
+// The finalize turn resumes a pass that had already judged some files before it
+// asked. The answer changes what it knows, so the right move is to walk the
+// findings it has already made and say, for each, whether it still holds - not
+// to re-derive the whole pass and let anything it happens not to re-report drop
+// out. Clearing by omission is what let a covered file take an unrelated
+// finding with it; here a carried finding is kept unless the turn names it in
+// withdrawn_findings with a reason.
+func carriedFindingsPromptSection(carried string) string {
+	parsed, err := types.ParseFindingsJSON(carried)
+	if err != nil || len(parsed.Items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nFindings you had already made in this pass, to re-adjudicate:\n")
+	b.WriteString("Go through each one with the answers in hand and decide whether it STILL HOLDS. ")
+	b.WriteString("A finding that still holds must appear again in findings. ")
+	b.WriteString("A finding the answers have disproved must appear in withdrawn_findings, by this id, with the reason it no longer holds. ")
+	b.WriteString("Anything you leave out of both is KEPT, so silence never retracts a finding. ")
+	b.WriteString("Then carry on reviewing whatever you had not reached yet, with the answers in mind.\n\n")
+	for i, f := range parsed.Items {
+		if i == maxReviewQuestionPromptEntries {
+			fmt.Fprintf(&b, "  - (%d more carried findings not listed)\n", len(parsed.Items)-i)
+			break
+		}
+		where := sanitizePromptText(f.File)
+		if where == "" {
+			where = "(no file)"
+		}
+		fmt.Fprintf(&b, "  - %s [%s] %s\n", sanitizePromptText(f.ID), where,
+			boundReviewQuestionText(sanitizePromptText(f.Description), maxReviewQuestionPromptChars))
+	}
+	return b.String()
+}
+
 // settledQuestionsPromptSection lists what a human already answered about this
 // branch, in any run, so a cold reviewer stops re-asking it.
 //

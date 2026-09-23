@@ -704,15 +704,20 @@ func TestExecutor_ReviewCarryForward_AnUnreadableHistoryDoesNotBlockVerification
 	waitExecutorDone(t, done)
 }
 
-// TestExecutor_ReviewCarryForward_AnAnswerRoundCanVerifyWhatItCarried covers
-// the round type the append-only set was not written for. The reviewer's
-// protocol tells it to prefix any finding contingent on an open question with
+// TestExecutor_ReviewCarryForward_AnAnswerRoundWithdrawsByName covers the round
+// type the append-only set was not written for. The reviewer's protocol tells
+// it to prefix any finding contingent on an open question with
 // "PENDING ANSWER (<id>)", so a round that asks a question routinely reports
-// one. Nothing is dispatched to a fixer, so without seeding there is nothing
-// pending to verify, and the finalize turn that learns the answer disproves
-// the finding cannot withdraw it: the carry-forward re-injects it, still
-// pointing at a question that is already settled.
-func TestExecutor_ReviewCarryForward_AnAnswerRoundCanVerifyWhatItCarried(t *testing.T) {
+// one, and the finalize turn that learns the answer disproves it must be able
+// to retract it - otherwise the carry-forward re-injects it, still pointing at
+// a question that is already settled.
+//
+// It retracts by NAMING the finding in withdrawn_findings. Clearing it by
+// coverage silence was the earlier rule and is gone: an answer changes what the
+// reviewer knows rather than the code, so a turn that covered the file proved
+// nothing about any finding in it, and an unrelated finding used to drop with
+// it. The sibling below pins that silence now keeps a finding.
+func TestExecutor_ReviewCarryForward_AnAnswerRoundWithdrawsByName(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
 
@@ -729,10 +734,13 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundCanVerifyWhatItCarried(t *test
 					ReviewablePaths: []string{"service.go"},
 				}, nil
 			}
-			// The finalize turn: the answer settled the question and disproved
-			// the contingent finding, so it reports neither, over a genuine
-			// coverage record for the file it carried in.
-			return &StepOutcome{ReviewedPaths: []string{"service.go"}, ReviewablePaths: []string{"service.go"}}, nil
+			// The finalize turn: the answer settled the question and
+			// disproved the contingent finding, so it says so by name.
+			return &StepOutcome{
+				ReviewedPaths:       []string{"service.go"},
+				ReviewablePaths:     []string{"service.go"},
+				WithdrawnFindingIDs: []string{"review-1"},
+			}, nil
 		},
 	}
 
@@ -755,6 +763,85 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundCanVerifyWhatItCarried(t *test
 	if steps[0].FindingsJSON != nil && strings.Contains(*steps[0].FindingsJSON, "review-1") {
 		t.Fatalf("the contingent finding survived the answer that disproved it: %s", *steps[0].FindingsJSON)
 	}
+}
+
+// TestExecutor_ReviewCarryForward_AnAnswerRoundSilenceKeepsAnUnrelatedFinding is
+// the defect the withdrawal list exists to close.
+//
+// Under the earlier rule an answer round seeded its whole carried set as
+// pending verification, so the finalize turn's coverage record cleared any
+// carried finding whose file it named and did not re-report - including one the
+// answers had nothing to do with. That let the review gate complete having
+// silently dropped a defect nobody fixed, selected or approved. Here the turn
+// covers the file and withdraws NOTHING, so the unrelated finding must survive.
+func TestExecutor_ReviewCarryForward_AnAnswerRoundSilenceKeepsAnUnrelatedFinding(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			round++
+			if round == 1 {
+				return &StepOutcome{
+					NeedsApproval:   true,
+					Findings:        `{"findings":[{"id":"review-1","severity":"warning","file":"service.go","line":10,"description":"PENDING ANSWER (q1): the legacy route is only wrong if /v1 is going","action":"ask-user"},{"id":"review-2","severity":"error","file":"service.go","line":88,"description":"nil deref on the error path, nothing to do with the question","action":"ask-user"},{"id":"question-q1","severity":"warning","description":"Review question awaiting an answer: is /v1 going?","action":"ask-user","category":"review-question"}],"summary":"2 findings and a question"}`,
+					ReviewedPaths:   []string{"service.go"},
+					ReviewablePaths: []string{"service.go"},
+				}, nil
+			}
+			// The finalize turn withdraws only what the answer disproved, and
+			// says nothing about the unrelated finding, over a full coverage
+			// record for the file both live in.
+			return &StepOutcome{
+				ReviewedPaths:       []string{"service.go"},
+				ReviewablePaths:     []string{"service.go"},
+				WithdrawnFindingIDs: []string{"review-1"},
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Respond returns before the round runs, so the pre-answer snapshot is
+	// still on the step. The finalize turn is the one that settles the
+	// question, so its disappearance is the signal that the round landed.
+	var steps []*db.StepResult
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var err error
+		steps, err = database.GetStepsByRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(steps) > 0 && steps[0].FindingsJSON != nil && !strings.Contains(*steps[0].FindingsJSON, "question-q1") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the answer round never landed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if steps[0].FindingsJSON == nil {
+		t.Fatal("the gate lost every finding, including the unrelated one")
+	}
+	if !strings.Contains(*steps[0].FindingsJSON, "review-2") {
+		t.Fatalf("an unrelated finding was cleared by an answer round that never withdrew it: %s", *steps[0].FindingsJSON)
+	}
+	if strings.Contains(*steps[0].FindingsJSON, "review-1") {
+		t.Fatalf("the withdrawn finding survived its own retraction: %s", *steps[0].FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
 }
 
 // TestResolveVerifiedFindingsJSON pins the verify-before-clear rule: only a
