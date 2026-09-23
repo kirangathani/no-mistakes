@@ -2172,3 +2172,39 @@ func (e *Executor) ReviewConversationDir(runID string) string {
 func (e *Executor) ReviewConversationEnabled() bool {
 	return e.config != nil && e.config.Review.Conversation
 }
+
+// ReviewConversationAnswerDir is where an answer for this run may be appended,
+// or empty when no answer may be.
+//
+// It is deliberately NOT ReviewConversationDir. That one is the feature's
+// off-switch and answers from the current effective config alone, which is
+// right for the review step: a repository with the conversation off must
+// ignore questions already on disk (TestReviewStep_ConversationOffIgnoresQuestionsAlreadyOnDisk).
+//
+// The ANSWER path needs a different question answered. review.conversation is
+// trusted-default-branch-only and is re-resolved on recovery from the current
+// default-branch tip, so a maintainer who turns it off - or a trusted-config
+// fetch that fails and therefore reads as off - while a run is parked on open
+// questions used to strand those questions: the reviewer had already asked
+// them under the config in force at the time, and nothing could answer them
+// afterwards. The questions on disk are the evidence that the channel was
+// open when they were asked, so they stay answerable. Answering cannot turn
+// the feature on for anything else: the review step still keys on
+// ReviewConversationDir, so no prompt protocol, no new question, and no
+// finding comes back from an off conversation.
+//
+// The file must exist; an off conversation with nothing on disk is refused as
+// before, so the setting still governs whether a channel can be opened at all.
+func (e *Executor) ReviewConversationAnswerDir(runID string) string {
+	dir := reviewqa.Dir(e.runEvidenceDir(runID))
+	if dir == "" {
+		return ""
+	}
+	if e.ReviewConversationEnabled() {
+		return dir
+	}
+	if _, err := os.Stat(filepath.Join(dir, reviewqa.QuestionsFile)); err != nil {
+		return ""
+	}
+	return dir
+}
