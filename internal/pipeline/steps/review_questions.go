@@ -29,11 +29,14 @@ func reviewConversationEnabled(sctx *pipeline.StepContext) bool {
 
 // reviewConversationDir is where this run's review conversation lives.
 //
-// Empty is the single off-switch for the whole protocol, and every consumer
-// keys on it: the reviewer is told nothing about a question channel, no files
-// are created, no question findings are produced, the review turn stays
-// session-free, and the PR body grows no conversation group - byte for byte
-// the behavior of a build without this feature.
+// Empty is the off-switch for ASKING, and every ask-side consumer keys on it:
+// the reviewer is told nothing about a question channel, no files are created,
+// no question findings are produced (which is what parks the step), the
+// settled-questions section is absent, and the PR body grows no conversation
+// group - byte for byte the behavior of a build without this feature.
+//
+// Whether a conversation that already EXISTS may be read and answered is a
+// separate question, owned by reviewConversationReadDir below.
 //
 // It is empty for two reasons. review.conversation is off, which is the
 // default and means the repository has not asked for the conversation; or the
@@ -566,8 +569,10 @@ func marshalSanitizedAnswerLine(a db.ReviewAnswer) string {
 //
 // Three conditions must all hold, and each one is load-bearing:
 //
-//   - the conversation is on. Off, there is nothing to re-check and the gate
-//     behaves exactly as it did before this feature existed.
+//   - a conversation may be READ: the setting is on, or the reviewer's
+//     questions are already on disk (see reviewConversationReadDir). Neither,
+//     and there is nothing to re-check and the gate behaves exactly as it did
+//     before this feature existed.
 //   - the parked gate actually carries review-question findings. A review gate
 //     parked on ordinary ask-user CODE findings must never be answered out from
 //     under the operator just because no question happens to be open - that is

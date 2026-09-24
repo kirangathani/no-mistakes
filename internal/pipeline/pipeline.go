@@ -44,9 +44,10 @@ type StepContext struct {
 	// combination is reachable - not to forbid it.
 	FinalizingAnswers     bool
 	ReviewStartingHeadSHA string
-	// CarriedFindings is the whole outstanding set an ANSWER round carries in,
-	// so the finalize turn can re-adjudicate each one by id. Empty on every
-	// other round type.
+	// CarriedFindings is the outstanding set an ANSWER round carries in, minus
+	// the reviewer's own open-question rows (see answerRoundCarriedFindings),
+	// so the finalize turn re-adjudicates by id only findings it made itself.
+	// Empty on every other round type.
 	CarriedFindings  string
 	PreviousFindings string // JSON findings selected for the current fix round
 	DeferredFindings string // JSON findings left unselected when the current fix round began

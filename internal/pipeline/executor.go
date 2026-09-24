@@ -2164,9 +2164,12 @@ func selectedFindingCount(raw string, ids []string) int {
 // The executor is the single owner of that answer, for the same reason it owns
 // runEvidenceDir: the path depends on the run's EFFECTIVE config
 // (review.conversation and test.evidence.local_root), which only the executor
-// holds. Callers outside the pipeline - the daemon's answer handler - ask here
-// rather than re-deriving it from global config and drifting from where the
-// reviewer was actually told to write, or from whether it was told at all.
+// holds. ReviewConversationAnswerDir below builds on it, and tests in other
+// packages resolve a run's conversation through it, rather than re-deriving it
+// from global config and drifting from where the reviewer was actually told to
+// write, or from whether it was told at all. The daemon's answer handler asks
+// ReviewConversationAnswerDir instead, because an answer may also be accepted
+// for a conversation already on disk.
 func (e *Executor) ReviewConversationDir(runID string) string {
 	if !e.ReviewConversationEnabled() {
 		return ""
