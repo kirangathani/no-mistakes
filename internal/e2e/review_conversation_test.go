@@ -22,6 +22,13 @@ const (
 	conversationQuestionText = "Should the new flag default to off for existing installations?"
 	conversationAnswerText   = "default off"
 	conversationAnsweredBy   = "captain"
+
+	// The finding the asking turn reported as contingent on the answer, and
+	// the reason the finalize turn gives for retracting it. An answer round
+	// retracts by NAMING the carried finding, never by falling silent about
+	// it, so a reviewer that means to drop one has to say so.
+	conversationPendingFindingID = "review-pending"
+	conversationRetractionReason = "the answer settles the default, so the finding it was contingent on no longer holds"
 )
 
 // trustedRepoConfigWithReviewConversation is the .no-mistakes.yaml a maintainer
@@ -39,8 +46,10 @@ review:
 // (through the channel the prompt names, exactly as a real reviewer would) and
 // returns a finding that depends on the answer. The finalize turn - recognised
 // by the answers section the step appends to the whole review prompt - returns
-// a clean pass, so the run can only finish if the answer really reached the
-// reviewer.
+// a clean pass and RETRACTS that contingent finding by name, so the run can
+// only finish if the answer really reached the reviewer and its retraction was
+// applied. Falling silent about the finding would keep it outstanding, which
+// is the whole point of retracting by name.
 //
 // The finalize action is listed FIRST because the scenario matcher takes the
 // first matching substring, and the finalize prompt contains the review
@@ -53,6 +62,9 @@ func reviewConversationScenario(t *testing.T) string {
     text: "finished the pass with the operator's answer"
     structured:
       findings: []
+      withdrawn_findings:
+        - id: "` + conversationPendingFindingID + `"
+          reason: "` + conversationRetractionReason + `"
       summary: "the open question is settled; nothing blocking"
       risk_level: low
       risk_rationale: "answered question resolved the only concern"
@@ -63,7 +75,7 @@ func reviewConversationScenario(t *testing.T) string {
       - '{"id":"q1","kind":"question","question":"` + conversationQuestionText + `","options":["default off","default on"],"weight":"major","file":"feature.txt","line":1,"area":"config loader"}'
     structured:
       findings:
-        - id: "review-pending"
+        - id: "` + conversationPendingFindingID + `"
           severity: warning
           file: "feature.txt"
           line: 1
@@ -229,6 +241,25 @@ func TestReviewConversationJourney(t *testing.T) {
 	}
 	if !strings.Contains(finalize, conversationAnswerText) {
 		t.Errorf("finalize review prompt does not carry the operator's answer:\n%s", promptTail(finalize))
+	}
+	// The finding the asking turn made contingent on the answer was carried
+	// into that finalize turn and left only because the turn named it, with a
+	// reason the operator can read back off the step log.
+	if !strings.Contains(finalize, conversationPendingFindingID) {
+		t.Errorf("finalize review prompt does not carry the contingent finding for re-adjudication:\n%s", promptTail(finalize))
+	}
+	reviewLog, err := h.RunInDir(fw, "axi", "logs", "--step", "review", "--full")
+	if err != nil {
+		t.Fatalf("axi logs --step review --full: %v\n%s", err, reviewLog)
+	}
+	retraction := "answers retracted finding " + conversationPendingFindingID + ": " + conversationRetractionReason
+	if !strings.Contains(reviewLog, retraction) {
+		t.Errorf("the review step log does not record the retraction %q:\n%s", retraction, reviewLog)
+	}
+	for _, line := range strings.Split(reviewLog, "\n") {
+		if strings.Contains(line, "answers retracted finding") {
+			t.Logf("the retraction as the operator reads it back:\n%s", strings.TrimSpace(line))
+		}
 	}
 	// No fixer ever ran on the question: --yes stood aside, and the answer path
 	// never reaches the fix agent.
