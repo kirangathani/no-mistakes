@@ -934,3 +934,138 @@ func TestReviewConversationSupersededRoundsReachTheNextReviewer(t *testing.T) {
 		t.Errorf("the superseded-rounds section lost its metadata framing:\n%s", section)
 	}
 }
+
+// The finding the operator selects for a fix round, and the retraction the
+// rereview claims over it. Only an ANSWER round may retract a carried finding
+// by naming it: a fix round is held to the coverage rule, so a retraction it
+// declares must change nothing.
+const (
+	fixRoundCarriedFindingID  = "review-carried"
+	fixRoundClaimedRetraction = "the fix round settled it"
+)
+
+// reviewFixRoundRetractionScenario drives a reviewer that reports one ask-user
+// finding, a fixer that edits the file, and a rereview that reports nothing,
+// certifies NO path, and names the carried finding in withdrawn_findings. The
+// rereview is recognised by the fix-round provenance clause, which only a
+// rereview after a fix round carries.
+func reviewFixRoundRetractionScenario(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fix-round-retraction-scenario.yaml")
+	content := `actions:
+  - match: "Fix-round provenance:"
+    text: "rereview claims a retraction it is not entitled to make"
+    structured:
+      findings: []
+      reviewed_paths: []
+      withdrawn_findings:
+        - id: "` + fixRoundCarriedFindingID + `"
+          reason: "` + fixRoundClaimedRetraction + `"
+      summary: "claiming the carried finding no longer holds"
+      risk_level: low
+      risk_rationale: "nothing else found"
+      risk_scope: source-or-external
+  - match: "Investigate previous review findings"
+    text: "edited the file the finding named"
+    edits:
+      - path: feature.txt
+        new: "flag = false\n"
+    structured:
+      summary: "flipped the default"
+  - match: "Review the code changes and return structured findings"
+    text: "one finding for the operator"
+    structured:
+      findings:
+        - id: "` + fixRoundCarriedFindingID + `"
+          severity: warning
+          file: "feature.txt"
+          line: 1
+          description: "the flag ships enabled for existing installations"
+          action: ask-user
+      reviewed_paths:
+        - "feature.txt"
+      summary: "one finding for the operator"
+      risk_level: medium
+      risk_rationale: "a default changes for existing installations"
+      risk_scope: source-or-external
+  - text: "no issues found"
+    structured:
+      findings: []
+      summary: "no issues found"
+      risk_level: low
+      risk_rationale: "no risks detected in the diff"
+      risk_scope: source-or-external
+      tested:
+        - "fakeagent: simulated test run"
+      testing_summary: "simulated tests passed"
+      scenarios:
+        - name: "fakeagent: simulated end-to-end scenario"
+          result: pass
+          live: true
+          evidence: "fakeagent: simulated test run"
+          reason: ""
+      verdict: go
+      artifacts: []
+      title: "feat: fakeagent change"
+      body: "## Summary\nfakeagent canned PR body"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fix-round retraction scenario: %v", err)
+	}
+	return path
+}
+
+// TestReviewFixRoundCannotRetractACarriedFinding is the adversarial half of the
+// retraction protocol. Retracting by name is what an answer round does instead
+// of falling silent; a FIX round has no such licence, because the finding it
+// would retract is one no round positively verified. An agent that declares
+// withdrawn_findings on a rereview anyway must change nothing: the finding is
+// still outstanding at the gate that follows, and nothing is recorded as
+// retracted.
+func TestReviewFixRoundCannotRetractACarriedFinding(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: reviewFixRoundRetractionScenario(t)})
+	pushMainRepoConfig(t, h, trustedRepoConfigWithReviewConversation)
+
+	h.CommitChange("init-fix-retraction", "seed.txt", "seed\n", "seed for the fix-round retraction journey")
+	initWorktree := h.AddWorktree("init-fix-retraction")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+
+	branch := "feature/fix-round-retraction"
+	h.CommitChange(branch, "feature.txt", "flag = true\n", "add the feature flag")
+	fw := h.AddWorktree(branch)
+
+	firstGate, err := h.RunInDir(fw, "axi", "run", "--intent", "wire the feature flag into the config loader")
+	if err != nil {
+		t.Fatalf("axi run: %v\n%s", err, firstGate)
+	}
+	if !strings.Contains(firstGate, fixRoundCarriedFindingID) {
+		t.Fatalf("the first review gate does not carry the finding to select:\n%s", firstGate)
+	}
+
+	// The operator dispatches it to the fixer. The rereview that follows both
+	// reports nothing and claims the retraction it is not entitled to make.
+	fixGate, err := h.RunInDir(fw, "axi", "respond", "--action", "fix", "--findings", fixRoundCarriedFindingID)
+	if err != nil {
+		t.Fatalf("axi respond --action fix: %v\n%s", err, fixGate)
+	}
+	t.Logf("the gate after the rereview that claimed a retraction:\n%s", fixGate)
+	if !strings.Contains(fixGate, "gate:") || !strings.Contains(fixGate, "step: review") {
+		t.Fatalf("the rereview did not park for the operator:\n%s", fixGate)
+	}
+	if !strings.Contains(fixGate, fixRoundCarriedFindingID) {
+		t.Fatalf("a fix round retracted a carried finding by naming it; it is gone from the gate:\n%s", fixGate)
+	}
+
+	reviewLog, err := h.RunInDir(fw, "axi", "logs", "--step", "review", "--full")
+	if err != nil {
+		t.Fatalf("axi logs --step review --full: %v\n%s", err, reviewLog)
+	}
+	if strings.Contains(reviewLog, "retracted finding") {
+		t.Errorf("a retraction was recorded for a round that may not make one:\n%s", reviewLog)
+	}
+	if strings.Contains(reviewLog, fixRoundClaimedRetraction) {
+		t.Errorf("the fix round's claimed reason reached the operator's record:\n%s", reviewLog)
+	}
+}

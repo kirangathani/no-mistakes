@@ -1614,11 +1614,18 @@ func withdrawnIDs(t *testing.T, raw string) []string {
 }
 
 // TestExecutor_ReviewCarryForward_ARetractionIsRecordedOnlyOnTheRoundThatMadeIt
-// covers the inheritance route. An answer round's retraction is stamped onto
-// the payload it persists, and that payload becomes the outstanding set the
-// NEXT round merges from - so without a per-round reset the merge copies the
-// record forward and a fix round that retracted nothing records a retraction,
-// on its row and on every row after it.
+// covers the stamp-after-assign ordering. An answer round's retraction is
+// stamped onto the payload it persists, and a later round that retracted
+// nothing must carry none - which holds here because the loop takes the
+// outstanding set it carries forward BEFORE the stamp, so the record cannot
+// ride along with it.
+//
+// It does not reach the merge-inheritance route: both of its resolutions are
+// answers, and only an operator `--action fix` after a retracting answer round
+// merges from the stamped payload. That route is guarded by the
+// WithdrawnFindings resets in mergeOutstandingFindingsJSON, covered by
+// TestExecutor_ReviewCarryForward_AnEmptyOutstandingSetRecordsNoRetraction and
+// TestExecutor_ReviewCarryForward_ARecoveredRoundInheritsNoRetractionRecord.
 func TestExecutor_ReviewCarryForward_ARetractionIsRecordedOnlyOnTheRoundThatMadeIt(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

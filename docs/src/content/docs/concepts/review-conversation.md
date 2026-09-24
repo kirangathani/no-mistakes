@@ -64,9 +64,9 @@ the sole writer of `questions.ndjson` - it appends with its own file tools, and
 there is no Go writer for that file - so every other field is optional on read:
 `kind` defaults to `question` when absent, an absent `weight` is treated as
 `major` (only an explicit `minor` is dropped), and `asked_at` is never read at
-all, since a re-ask is detected by counting asks against answers rather than by
-comparing timestamps. A line that omits them is the normal case, not a
-degraded one.
+all, since an ask is settled only by an answer carrying its own `ask_ordinal`
+rather than by comparing timestamps. A line that omits them is the normal case,
+not a degraded one.
 
 The conversation stays LOCAL to the run. The files live in the run's evidence
 directory, but the conversation directory is excluded from the evidence-branch
