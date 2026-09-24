@@ -801,6 +801,20 @@ func TestReviewStep_ConversationOffIsTodaysReview(t *testing.T) {
 		t.Fatalf("the off run persisted %d role session(s): %+v", len(sessions), sessions)
 	}
 
+	// The agent contract is part of the off-state guarantee, not just the
+	// prompt: a repository that never turned the conversation on must not be
+	// offered a property whose description names a concept its reviewer is
+	// never told about. The schema is a machine-consumed contract, so it is
+	// decoded and interrogated rather than matched as text.
+	offProps := schemaPropertyNames(t, offAgent.calls[0].JSONSchema)
+	if _, ok := offProps["withdrawn_findings"]; ok {
+		t.Fatalf("the off review turn was handed the conversation's retraction property; declared: %v", offProps)
+	}
+	onProps := schemaPropertyNames(t, onAgent.calls[0].JSONSchema)
+	if _, ok := onProps["withdrawn_findings"]; ok {
+		t.Fatalf("an ASKING turn was handed the retraction property; only a finalize turn may retract. declared: %v", onProps)
+	}
+
 	// No question findings, and no PR conversation group.
 	if got := questionFindings(t, offOutcome.Findings); len(got) != 0 {
 		t.Fatalf("the off run produced %d review-question finding(s)", len(got))
@@ -1328,5 +1342,56 @@ func TestReviewStep_FinalizeTurnCanActuallyRetractWhatItCarried(t *testing.T) {
 
 	if got := outcome.WithdrawnFindingIDs; len(got) != 1 || got[0] != "review-1" {
 		t.Fatalf("the retraction the finalize turn emitted did not reach the executor: %v", got)
+	}
+}
+
+// schemaPropertyNames decodes the JSON schema a step handed the agent - the
+// generated contract that decides which fields the turn may emit at all - and
+// returns its declared top-level property names.
+func schemaPropertyNames(t *testing.T, raw json.RawMessage) map[string]struct{} {
+	t.Helper()
+	if len(raw) == 0 {
+		t.Fatal("the step handed the agent no JSON schema")
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("the step handed the agent an unparseable schema: %v", err)
+	}
+	names := make(map[string]struct{}, len(schema.Properties))
+	for name := range schema.Properties {
+		names[name] = struct{}{}
+	}
+	return names
+}
+
+// TestReviewStep_OnlyAFinalizeTurnIsOfferedTheRetractionProperty is the other
+// half of the off-state schema guarantee: withholding the property must not
+// withhold it from the one turn that needs it. The finalize prompt instructs
+// the turn to name a disproved carried finding in withdrawn_findings, and the
+// executor applies that list only on such a turn, so the contract and the
+// instruction have to arrive together or the retraction path is unreachable.
+func TestReviewStep_OnlyAFinalizeTurnIsOfferedTheRetractionProperty(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := newStaticReviewAgent(cleanReviewJSON)
+	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
+	convDir := reviewConversationDir(sctx)
+	if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"is /v1 going?","options":["keep","remove"],"weight":"major"}`); err != nil {
+		t.Fatalf("seed question: %v", err)
+	}
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AskOrdinal: 1}); err != nil {
+		t.Fatalf("append answer: %v", err)
+	}
+	sctx.FinalizingAnswers = true
+	sctx.CarriedFindings = `{"findings":[{"id":"review-1","severity":"warning","file":"feature.txt","line":1,"description":"PENDING ANSWER (q1): only wrong if /v1 is going","action":"ask-user"}],"summary":"1 carried finding"}`
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatalf("finalize turn: %v", err)
+	}
+
+	props := schemaPropertyNames(t, ag.calls[len(ag.calls)-1].JSONSchema)
+	if _, ok := props["withdrawn_findings"]; !ok {
+		t.Fatalf("the finalize turn is told to retract by name but its schema declares no withdrawn_findings, so the retraction path is unreachable; declared: %v", props)
 	}
 }

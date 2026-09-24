@@ -322,18 +322,6 @@ var reviewFindingsSchema = json.RawMessage(`{
 			"items": {"type": "string"},
 			"description": "Exact set of changed files this pass actually read and judged; a file omitted here is treated as unverified"
 		},
-		"withdrawn_findings": {
-			"type": "array",
-			"items": {
-				"type": "object",
-				"properties": {
-					"id": {"type": "string"},
-					"reason": {"type": "string"}
-				},
-				"required": ["id", "reason"]
-			},
-			"description": "Answer rounds only: carried findings that no longer hold now the questions are answered. A carried finding you omit here is kept."
-		},
 		"tested": {
 			"type": "array",
 			"items": {"type": "string"}

@@ -355,13 +355,12 @@ round's dispatched findings already earned their entries and keep them, so the
 finalize turn is still their verification rereview under the ordinary coverage
 rule. For every finding the answer round merely carries, silence keeps it.
 
-A fix CHANGES the code,
-so a rereview that names the file and no longer reports the defect is evidence
-the change worked. An answer changes nothing but what the reviewer knows, so the
-same silence proves nothing about any particular finding: a finalize turn that
-covered a file used to take every carried finding in it, including ones the
-answers had no bearing on, and the gate could complete having silently dropped a
-defect nobody fixed, selected or approved.
+A fix CHANGES the code, so a rereview that names the file and no longer reports
+the defect is evidence the change worked. An answer changes nothing but what the
+reviewer knows, so the same silence proves nothing about any particular finding:
+a finalize turn that covered a file used to take every carried finding in it,
+including ones the answers had no bearing on, and the gate could complete having
+silently dropped a defect nobody fixed, selected or approved.
 
 So an answer round retracts by NAMING. The carried set rides the prompt, the
 turn walks it item by item with the answers in hand, and each finding either

@@ -446,7 +446,7 @@ Risk assessment (after listing all findings):
 		Prompt:     turnPrompt,
 		CWD:        sctx.WorkDir,
 		Env:        sctx.Env,
-		JSONSchema: reviewSchemaForDecisions(decisions),
+		JSONSchema: reviewSchemaForDecisions(decisions, sctx.FinalizingAnswers && convDir != ""),
 		OnChunk:    sctx.LogChunk,
 		Purpose:    "review",
 		Workload:   workload,
