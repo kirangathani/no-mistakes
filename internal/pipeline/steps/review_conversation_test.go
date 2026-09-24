@@ -869,8 +869,14 @@ func TestReviewStep_FinalizeTurnDeliversAnswersEvenWithTheSettingOff(t *testing.
 	}
 	// The ask side stays off: this turn may READ what was asked, never invite
 	// a new question.
-	if strings.Contains(prompt, "Review question protocol") {
-		t.Fatalf("an off repository's finalize turn was told it may ask questions:\n%s", prompt)
+	for _, marker := range []string{
+		"Asking questions while you work",
+		"Append one JSON object per line to " + reviewqa.QuestionsFile,
+		"KEEP REVIEWING while a question is open",
+	} {
+		if strings.Contains(prompt, marker) {
+			t.Fatalf("an off repository's finalize turn was told it may ask questions (%q):\n%s", marker, prompt)
+		}
 	}
 }
 
