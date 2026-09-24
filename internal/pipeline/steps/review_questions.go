@@ -177,6 +177,7 @@ func carriedFindingsPromptSection(carried string) string {
 	b.WriteString("A finding that still holds must appear again in findings. ")
 	b.WriteString("A finding the answers have disproved must appear in withdrawn_findings, by this id, with the reason it no longer holds. ")
 	b.WriteString("Anything you leave out of both is KEPT, so silence never retracts a finding. ")
+	b.WriteString("A row marked [operator] is the operator's own instruction rather than a finding you made, so you cannot retract it: naming one in withdrawn_findings is ignored. ")
 	b.WriteString("Then carry on reviewing whatever you had not reached yet, with the answers in mind.\n\n")
 	for i, f := range parsed.Items {
 		if i == maxReviewQuestionPromptEntries {
@@ -187,7 +188,11 @@ func carriedFindingsPromptSection(carried string) string {
 		if where == "" {
 			where = "(no file)"
 		}
-		fmt.Fprintf(&b, "  - %s [%s] %s\n", sanitizePromptText(f.ID), where,
+		author := ""
+		if f.Source == types.FindingSourceUser {
+			author = " [operator]"
+		}
+		fmt.Fprintf(&b, "  - %s%s [%s] %s\n", sanitizePromptText(f.ID), author, where,
 			boundReviewQuestionText(sanitizePromptText(f.Description), maxReviewQuestionPromptChars))
 	}
 	return b.String()

@@ -1267,7 +1267,7 @@ func TestReviewStep_UnreadableConversationFailsTheReview(t *testing.T) {
 
 // TestReviewStep_FinalizeTurnCanActuallyRetractWhatItCarried crosses the one
 // boundary the carry-forward regressions in internal/pipeline never touch:
-// they set StepOutcome.WithdrawnFindingIDs on a fake step, so they pass just as
+// they set StepOutcome.WithdrawnFindings on a fake step, so they pass just as
 // well when the review agent is never offered the field at all.
 //
 // The finalize prompt instructs the turn to name a disproved carried finding in
@@ -1340,8 +1340,10 @@ func TestReviewStep_FinalizeTurnCanActuallyRetractWhatItCarried(t *testing.T) {
 		}
 	}
 
-	if got := outcome.WithdrawnFindingIDs; len(got) != 1 || got[0] != "review-1" {
+	if got := outcome.WithdrawnFindings; len(got) != 1 || got[0].ID != "review-1" {
 		t.Fatalf("the retraction the finalize turn emitted did not reach the executor: %v", got)
+	} else if got[0].Reason == "" {
+		t.Fatal("the retraction reached the executor without the reason the schema requires and the prompt demands")
 	}
 }
 

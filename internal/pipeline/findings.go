@@ -844,37 +844,69 @@ func dropReviewQuestionFindingsJSON(raw string) string {
 // nothing - it used to clear any carried finding whose file the finalize turn
 // happened to cover, including one the answer had no bearing on. Requiring the
 // turn to name what it retracts makes the retraction its own claim.
-func dropWithdrawnFindingsJSON(raw string, withdrawnIDs []string) string {
-	if raw == "" || len(withdrawnIDs) == 0 {
-		return raw
+// An operator-authored finding is never retractable, whatever the turn names.
+// It is not a claim the reviewer made, it is an instruction the operator gave,
+// so the reviewer has no standing to withdraw it - the same principle that
+// makes every automatic resolver stand aside at a review question. Such a
+// finding still leaves the outstanding set only on positive coverage or on the
+// operator's own approve, skip or abort.
+//
+// It returns the retractions it actually applied, so the caller can record the
+// reason each finding left by.
+func dropWithdrawnFindingsJSON(raw string, withdrawn []types.WithdrawnFinding) (string, []types.WithdrawnFinding) {
+	if raw == "" || len(withdrawn) == 0 {
+		return raw, nil
 	}
-	withdrawn := make(map[string]bool, len(withdrawnIDs))
-	for _, id := range withdrawnIDs {
-		if id != "" {
-			withdrawn[id] = true
+	reasons := make(map[string]string, len(withdrawn))
+	for _, w := range withdrawn {
+		if w.ID != "" {
+			reasons[w.ID] = w.Reason
 		}
 	}
-	if len(withdrawn) == 0 {
+	if len(reasons) == 0 {
+		return raw, nil
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return raw, nil
+	}
+	var applied []types.WithdrawnFinding
+	kept := make([]types.Finding, 0, len(findings.Items))
+	for _, item := range findings.Items {
+		if reason, named := reasons[item.ID]; named && item.Source != types.FindingSourceUser {
+			applied = append(applied, types.WithdrawnFinding{ID: item.ID, Reason: reason})
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(applied) == 0 {
+		return raw, nil
+	}
+	if len(kept) == 0 {
+		return "", applied
+	}
+	findings.Items = kept
+	encoded, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		return raw, nil
+	}
+	return encoded, applied
+}
+
+// recordWithdrawnFindingsJSON stamps the retractions a round applied onto the
+// payload that round persists, so the round history says why a finding left
+// rather than only that it is gone. The carry-forward set is deliberately left
+// unstamped: these belong to the round that made them, not to every round
+// after it.
+func recordWithdrawnFindingsJSON(raw string, withdrawn []types.WithdrawnFinding) string {
+	if raw == "" || len(withdrawn) == 0 {
 		return raw
 	}
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil {
 		return raw
 	}
-	kept := make([]types.Finding, 0, len(findings.Items))
-	for _, item := range findings.Items {
-		if withdrawn[item.ID] {
-			continue
-		}
-		kept = append(kept, item)
-	}
-	if len(kept) == len(findings.Items) {
-		return raw
-	}
-	if len(kept) == 0 {
-		return ""
-	}
-	findings.Items = kept
+	findings.WithdrawnFindings = withdrawn
 	encoded, err := types.MarshalFindingsJSON(findings)
 	if err != nil {
 		return raw

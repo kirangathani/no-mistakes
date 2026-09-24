@@ -515,13 +515,13 @@ Risk assessment (after listing all findings):
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-		NeedsApproval:       needsApproval,
-		AutoFixable:         len(findings.Items) > 0,
-		Findings:            string(findingsJSON),
-		ReviewedPaths:       findings.ReviewedPaths,
-		WithdrawnFindingIDs: withdrawnFindingIDs(findings),
-		ReviewablePaths:     reviewable,
-		FixSummary:          fixSummary,
+		NeedsApproval:     needsApproval,
+		AutoFixable:       len(findings.Items) > 0,
+		Findings:          string(findingsJSON),
+		ReviewedPaths:     findings.ReviewedPaths,
+		WithdrawnFindings: withdrawnFindings(findings),
+		ReviewablePaths:   reviewable,
+		FixSummary:        fixSummary,
 	})
 }
 
@@ -744,21 +744,23 @@ func reviewAgentError(ctx context.Context, timeout time.Duration, prefix string,
 	return fmt.Errorf("%s: %w", prefix, err)
 }
 
-// withdrawnFindingIDs is the answer round's retraction list, reduced to the ids
-// the executor removes. A blank id is dropped: an entry that names nothing
-// cannot retract anything, and letting it through would clear on a typo.
+// withdrawnFindings is the answer round's retraction list. A blank id is
+// dropped: an entry that names nothing cannot retract anything, and letting it
+// through would clear on a typo. The reason travels with the id because a
+// retraction is a claim the reviewer makes, and the executor records it where
+// the finding's disappearance can be read back against it.
 //
 // Whether a round may retract at all is the executor's call, not this one's:
 // it owns the outstanding set and applies this list only on a finalize turn.
-func withdrawnFindingIDs(findings Findings) []string {
+func withdrawnFindings(findings Findings) []types.WithdrawnFinding {
 	if len(findings.WithdrawnFindings) == 0 {
 		return nil
 	}
-	ids := make([]string, 0, len(findings.WithdrawnFindings))
+	withdrawn := make([]types.WithdrawnFinding, 0, len(findings.WithdrawnFindings))
 	for _, w := range findings.WithdrawnFindings {
 		if id := strings.TrimSpace(w.ID); id != "" {
-			ids = append(ids, id)
+			withdrawn = append(withdrawn, types.WithdrawnFinding{ID: id, Reason: strings.TrimSpace(w.Reason)})
 		}
 	}
-	return ids
+	return withdrawn
 }

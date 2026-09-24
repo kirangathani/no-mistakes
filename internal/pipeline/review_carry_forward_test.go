@@ -737,9 +737,9 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundWithdrawsByName(t *testing.T) 
 			// The finalize turn: the answer settled the question and
 			// disproved the contingent finding, so it says so by name.
 			return &StepOutcome{
-				ReviewedPaths:       []string{"service.go"},
-				ReviewablePaths:     []string{"service.go"},
-				WithdrawnFindingIDs: []string{"review-1"},
+				ReviewedPaths:     []string{"service.go"},
+				ReviewablePaths:   []string{"service.go"},
+				WithdrawnFindings: []types.WithdrawnFinding{{ID: "review-1", Reason: "the answer settled it"}},
 			}, nil
 		},
 	}
@@ -760,7 +760,7 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundWithdrawsByName(t *testing.T) 
 	if steps[0].Status != types.StepStatusCompleted {
 		t.Fatalf("step status = %s, want %s: the answer round could not withdraw the finding its answer disproved", steps[0].Status, types.StepStatusCompleted)
 	}
-	if steps[0].FindingsJSON != nil && strings.Contains(*steps[0].FindingsJSON, "review-1") {
+	if steps[0].FindingsJSON != nil && outstandingIDs(t, *steps[0].FindingsJSON)["review-1"] {
 		t.Fatalf("the contingent finding survived the answer that disproved it: %s", *steps[0].FindingsJSON)
 	}
 }
@@ -795,9 +795,9 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundSilenceKeepsAnUnrelatedFinding
 			// says nothing about the unrelated finding, over a full coverage
 			// record for the file both live in.
 			return &StepOutcome{
-				ReviewedPaths:       []string{"service.go"},
-				ReviewablePaths:     []string{"service.go"},
-				WithdrawnFindingIDs: []string{"review-1"},
+				ReviewedPaths:     []string{"service.go"},
+				ReviewablePaths:   []string{"service.go"},
+				WithdrawnFindings: []types.WithdrawnFinding{{ID: "review-1", Reason: "the answer settled it"}},
 			}, nil
 		},
 	}
@@ -831,10 +831,11 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundSilenceKeepsAnUnrelatedFinding
 	if steps[0].FindingsJSON == nil {
 		t.Fatal("the gate lost every finding, including the unrelated one")
 	}
-	if !strings.Contains(*steps[0].FindingsJSON, "review-2") {
+	outstanding := outstandingIDs(t, *steps[0].FindingsJSON)
+	if !outstanding["review-2"] {
 		t.Fatalf("an unrelated finding was cleared by an answer round that never withdrew it: %s", *steps[0].FindingsJSON)
 	}
-	if strings.Contains(*steps[0].FindingsJSON, "review-1") {
+	if outstanding["review-1"] {
 		t.Fatalf("the withdrawn finding survived its own retraction: %s", *steps[0].FindingsJSON)
 	}
 
@@ -1333,8 +1334,8 @@ func TestExecutor_ReviewCarryForward_AFixRoundCannotWithdraw(t *testing.T) {
 			// record to clear the selected finding with - and tries to retract
 			// it by name instead.
 			return &StepOutcome{
-				FixSummary:          "tidy unrelated code",
-				WithdrawnFindingIDs: []string{"review-1"},
+				FixSummary:        "tidy unrelated code",
+				WithdrawnFindings: []types.WithdrawnFinding{{ID: "review-1", Reason: "the answer settled it"}},
 			}, nil
 		},
 	}
@@ -1410,9 +1411,9 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundDoesNotCarryItsOwnQuestions(t 
 			}
 			carried = sctx.CarriedFindings
 			return &StepOutcome{
-				ReviewedPaths:       []string{"service.go"},
-				ReviewablePaths:     []string{"service.go"},
-				WithdrawnFindingIDs: []string{"review-1"},
+				ReviewedPaths:     []string{"service.go"},
+				ReviewablePaths:   []string{"service.go"},
+				WithdrawnFindings: []types.WithdrawnFinding{{ID: "review-1", Reason: "the answer settled it"}},
 			}, nil
 		},
 	}
@@ -1445,4 +1446,153 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundDoesNotCarryItsOwnQuestions(t 
 	if !sawCode {
 		t.Fatalf("the reviewer's own code finding was dropped from the carried set, so the turn cannot re-adjudicate it: %q", carried)
 	}
+}
+
+// TestExecutor_ReviewCarryForward_AnAnswerRoundCannotWithdrawTheOperatorsOwnFinding
+// covers the one finding a retraction may never reach. `respond --action fix
+// --add-finding` stamps the item Source=user with a user-N id, and that id and
+// source both survive into the outstanding set - so an answer round's carried
+// set hands it to the finalize turn like any other row. It is not a claim the
+// reviewer made, it is an instruction the operator gave, so a turn naming it in
+// withdrawn_findings must change nothing: it leaves only on positive coverage
+// or on the operator's own approve, skip or abort, which is the contract
+// docs/.../pipeline-steps.md already states for a selected finding.
+func TestExecutor_ReviewCarryForward_AnAnswerRoundCannotWithdrawTheOperatorsOwnFinding(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			round++
+			if round == 1 {
+				return &StepOutcome{
+					NeedsApproval:   true,
+					Findings:        reviewCarryTwoFindings,
+					ReviewedPaths:   []string{"service.go", "cache.go"},
+					ReviewablePaths: []string{"service.go", "cache.go"},
+				}, nil
+			}
+			if round == 2 {
+				// The fix round's rereview offers no coverage record, so
+				// nothing clears the ordinary way and the gate re-parks with
+				// the operator's own finding still outstanding.
+				return &StepOutcome{FixSummary: "no change"}, nil
+			}
+			// The finalize turn tries to retract the operator's instruction.
+			// It reports no coverage either, so the withdrawal is the only
+			// route by which user-1 could leave. The extra finding is how the
+			// test sees this round land: the gate is already parked as
+			// fix_review from the round before, so the status alone would let
+			// it read a pre-answer snapshot and pass vacuously.
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"review-9","severity":"info","file":"service.go","line":1,"description":"finalize turn ran","action":"no-op"}],"summary":"finalize"}`,
+				WithdrawnFindings: []types.WithdrawnFinding{
+					{ID: "user-1", Reason: "the answer says this is intended"},
+				},
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, nil, nil, []types.Finding{{
+		Severity:    types.FindingSeverityError,
+		File:        "service.go",
+		Line:        10,
+		Description: "the operator's own instruction: keep the /v1 shim",
+		Action:      types.ActionAskUser,
+	}}, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].FindingsJSON == nil {
+		t.Fatal("the gate carries no findings at all")
+	}
+	parsed, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse gate findings: %v", err)
+	}
+	var operatorID string
+	for _, item := range parsed.Items {
+		if item.Source == types.FindingSourceUser {
+			operatorID = item.ID
+		}
+	}
+	if operatorID != "user-1" {
+		t.Fatalf("fixture did not produce the operator-authored user-1 finding: %s", *steps[0].FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The gate is already fix_review, so the status cannot say the answer round
+	// landed; its own finding is what does.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		steps, err = database.GetStepsByRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(steps) > 0 && steps[0].FindingsJSON != nil && strings.Contains(*steps[0].FindingsJSON, "finalize turn ran") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the answer round never landed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Parsed, not substring-matched: an applied retraction records the id it
+	// removed on the round, so the id is present in the payload either way.
+	after, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse gate findings: %v", err)
+	}
+	var stillOutstanding bool
+	for _, item := range after.Items {
+		if item.ID == "user-1" {
+			stillOutstanding = true
+		}
+	}
+	if !stillOutstanding {
+		t.Fatalf("the reviewer retracted the operator's own finding; it may leave only on coverage or the operator's verdict: %s", *steps[0].FindingsJSON)
+	}
+	for _, w := range after.WithdrawnFindings {
+		if w.ID == "user-1" {
+			t.Fatalf("a refused retraction was recorded as if it had been applied: %s", *steps[0].FindingsJSON)
+		}
+	}
+
+	// The same id still clears the ordinary way: the operator's own verdict.
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
+
+// outstandingIDs is the ids still OUTSTANDING in a persisted findings payload.
+// A round that applied a retraction also records the ids it removed on that
+// payload, so a substring match over the raw JSON cannot tell a finding that
+// survived from one the round reported retracting.
+func outstandingIDs(t *testing.T, raw string) map[string]bool {
+	t.Helper()
+	parsed, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		t.Fatalf("parse findings: %v", err)
+	}
+	ids := make(map[string]bool, len(parsed.Items))
+	for _, item := range parsed.Items {
+		ids[item.ID] = true
+	}
+	return ids
 }

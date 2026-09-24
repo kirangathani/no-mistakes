@@ -1166,15 +1166,23 @@ rounds:
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no
 			// round ever positively verified.
+			var withdrawn []types.WithdrawnFinding
 			if sctx.FinalizingAnswers {
-				outstandingFindings = dropWithdrawnFindingsJSON(outstandingFindings, outcome.WithdrawnFindingIDs)
+				outstandingFindings, withdrawn = dropWithdrawnFindingsJSON(outstandingFindings, outcome.WithdrawnFindings)
+				for _, w := range withdrawn {
+					reason := w.Reason
+					if reason == "" {
+						reason = "no reason given"
+					}
+					writeLog(fmt.Sprintf("answers retracted finding %s: %s", w.ID, safeurl.RedactText(reason)))
+				}
 			}
-			selectedOutstandingIDs = retainFindingIDs(outstandingFindings, selectedOutstandingIDs)
 			outstandingFindings = resolveVerifiedFindingsJSON(outstandingFindings, pendingVerificationIDs, outcome.ReviewedPaths, outcome.ReviewablePaths, verificationFindings)
 			pendingVerificationIDs = retainFindingIDs(outstandingFindings, pendingVerificationIDs)
 			selectedOutstandingIDs = retainFindingIDs(outstandingFindings, selectedOutstandingIDs)
 			effectiveFindings = mergeOutstandingFindingsJSON(outstandingFindings, roundFindings, outcome.ReviewedPaths)
 			outstandingFindings = effectiveFindings
+			effectiveFindings = recordWithdrawnFindingsJSON(effectiveFindings, withdrawn)
 		}
 
 		if effectiveFindings != "" {

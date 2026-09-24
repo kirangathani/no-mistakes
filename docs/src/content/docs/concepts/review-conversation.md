@@ -377,11 +377,22 @@ clear it but approving over it.
 The coverage rule itself is untouched for every other round type, and a
 withdrawal is a claim the reviewer has to make in its own words, which is
 reviewable after the fact in a way silence never was. Only a finalize turn may
-retract: `withdrawn_findings` emitted by an initial review or by a fix-round
-rereview is discarded, because those rounds are held to the coverage rule and a
-retraction they claimed would clear a selected finding nothing positively
-verified. The schema's "Answer rounds only" description is guidance to the
-agent, not enforcement.
+retract, and two layers keep it that way: the `withdrawn_findings` property is
+declared only for a finalize turn with the conversation on, so an initial review
+or a fix-round rereview is never offered it at all, and the executor applies a
+retraction list only when the round it came from is a finalize turn. Those
+rounds are held to the coverage rule, and a retraction they claimed would clear
+a selected finding nothing positively verified.
+
+A retraction also has a floor. An operator-authored finding - one the operator
+added with `respond --action fix --add-finding` - is never retractable, whatever
+the turn names: it is not a claim the reviewer made but an instruction the
+operator gave, so it leaves the outstanding set only on positive coverage or on
+the operator's own approve, skip or abort. The carried-findings prompt marks
+those rows `[operator]` so the turn does not spend a round trying. Every
+retraction that is applied is written to the step log with the reason the turn
+gave, and recorded on the round, so a finding that disappears between rounds can
+be read back against the claim that removed it.
 
 ## What is persisted, and where the next cold reviewer reads it
 
