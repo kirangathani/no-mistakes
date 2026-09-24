@@ -348,7 +348,14 @@ until a later round positively verifies it - covers its file in `reviewed_paths`
 and stops reporting it - and a fix round earns that right for the findings it
 dispatched to the fixer.
 
-An answer round does not earn it, and is not given it. A fix CHANGES the code,
+An answer round earns no pending-verification entries of its own, and the set it
+carries in is not given any. The one exception is inherited rather than earned
+here: when the question was asked by a rereview INSIDE a fix round, that fix
+round's dispatched findings already earned their entries and keep them, so the
+finalize turn is still their verification rereview under the ordinary coverage
+rule. For every finding the answer round merely carries, silence keeps it.
+
+A fix CHANGES the code,
 so a rereview that names the file and no longer reports the defect is evidence
 the change worked. An answer changes nothing but what the reviewer knows, so the
 same silence proves nothing about any particular finding: a finalize turn that
