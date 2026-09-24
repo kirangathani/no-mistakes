@@ -1448,7 +1448,7 @@ rounds:
 				// fix and coverage silence therefore proves nothing about a
 				// finding. See dropWithdrawnFindingsJSON.
 				if carryFindings {
-					sctx.CarriedFindings = outstandingFindings
+					sctx.CarriedFindings = answerRoundCarriedFindings(true, outstandingFindings)
 				}
 				// A question can be asked by a rereview inside a fix round too.
 				// That round's fixes are already applied and committed, so the
@@ -2176,9 +2176,19 @@ func (e *Executor) ReviewConversationEnabled() bool {
 
 // answerRoundCarriedFindings is the outstanding set a finalize turn must
 // re-adjudicate, and empty on every other round type.
+//
+// The reviewer's own question rows are dropped: the carried set is taken before
+// the next round's dropReviewQuestionFindingsJSON runs, so it always still
+// carries the question-<id> row whose emission is why the gate parked. Asked to
+// re-adjudicate one, a turn that complies echoes it back through a findings
+// schema with no category field, so the echo is uncategorised, survives every
+// later drop, re-parks the gate as an ordinary ask-user warning, and instructs
+// an answer that only ever records a duplicate. A question is re-emitted from
+// the live conversation by every review turn and is resolved by its answer, so
+// nothing is lost by keeping it out of the prompt.
 func answerRoundCarriedFindings(answering bool, outstanding string) string {
 	if !answering {
 		return ""
 	}
-	return outstanding
+	return dropReviewQuestionFindingsJSON(outstanding)
 }

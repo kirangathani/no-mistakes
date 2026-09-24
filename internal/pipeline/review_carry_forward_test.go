@@ -1373,3 +1373,76 @@ func TestExecutor_ReviewCarryForward_AFixRoundCannotWithdraw(t *testing.T) {
 	}
 	waitExecutorDone(t, done)
 }
+
+// TestExecutor_ReviewCarryForward_AnAnswerRoundDoesNotCarryItsOwnQuestions
+// drives the carried set the executor really produces, which is what the
+// step-level fixtures cannot: they hand-write a code finding alone, while the
+// set taken at the ActionAnswer branch is the outstanding set BEFORE the next
+// round drops question rows from it - so it always still holds the
+// question-<id> row whose emission is why the gate parked.
+//
+// Handing that row to carriedFindingsPromptSection tells the finalize turn to
+// re-adjudicate a finding the step generated rather than one the reviewer made,
+// and a turn that complies echoes it back through a findings schema that has no
+// category field. The echo is therefore uncategorised: dropReviewQuestionFindingsJSON
+// (keyed on the category and the unreadable-marker ID, never the "question-"
+// prefix) never removes it, it re-parks the gate as an ordinary ask-user
+// warning, HasUnansweredReviewQuestion is false for it so --yes and the TUI's
+// yolo hand the fixer a question row, and the `axi answer` its own description
+// instructs records a duplicate that releases nothing.
+func TestExecutor_ReviewCarryForward_AnAnswerRoundDoesNotCarryItsOwnQuestions(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	round := 0
+	var carried string
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			round++
+			if round == 1 {
+				return &StepOutcome{
+					NeedsApproval:   true,
+					Findings:        `{"findings":[{"id":"review-1","severity":"warning","file":"service.go","line":10,"description":"PENDING ANSWER (q1): the legacy route is only wrong if /v1 is going","action":"ask-user"},{"id":"question-q1","severity":"warning","description":"Review question awaiting an answer: is /v1 going? Answer it with: no-mistakes axi answer --question q1 --answer ...","action":"ask-user","category":"review-question"}],"summary":"1 finding and a question"}`,
+					ReviewedPaths:   []string{"service.go"},
+					ReviewablePaths: []string{"service.go"},
+				}, nil
+			}
+			carried = sctx.CarriedFindings
+			return &StepOutcome{
+				ReviewedPaths:       []string{"service.go"},
+				ReviewablePaths:     []string{"service.go"},
+				WithdrawnFindingIDs: []string{"review-1"},
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+
+	if round < 2 {
+		t.Fatalf("the finalize turn never ran (round = %d)", round)
+	}
+	parsed, err := types.ParseFindingsJSON(carried)
+	if err != nil {
+		t.Fatalf("parse the carried set: %v (%q)", err, carried)
+	}
+	var sawCode bool
+	for _, item := range parsed.Items {
+		if item.Category == types.FindingCategoryReviewQuestion {
+			t.Errorf("the finalize turn was asked to re-adjudicate its own question row %q; an echo of it comes back uncategorised and parks the gate for ever", item.ID)
+		}
+		if item.ID == "review-1" {
+			sawCode = true
+		}
+	}
+	if !sawCode {
+		t.Fatalf("the reviewer's own code finding was dropped from the carried set, so the turn cannot re-adjudicate it: %q", carried)
+	}
+}

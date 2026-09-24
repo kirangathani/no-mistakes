@@ -370,7 +370,12 @@ clear it but approving over it.
 
 The coverage rule itself is untouched for every other round type, and a
 withdrawal is a claim the reviewer has to make in its own words, which is
-reviewable after the fact in a way silence never was.
+reviewable after the fact in a way silence never was. Only a finalize turn may
+retract: `withdrawn_findings` emitted by an initial review or by a fix-round
+rereview is discarded, because those rounds are held to the coverage rule and a
+retraction they claimed would clear a selected finding nothing positively
+verified. The schema's "Answer rounds only" description is guidance to the
+agent, not enforcement.
 
 ## What is persisted, and where the next cold reviewer reads it
 
