@@ -1295,3 +1295,81 @@ func TestRetainFindingIDsByIdentity_KeepsGenuineSameFindingAcrossRounds(t *testi
 }
 
 func strPtr(v string) *string { return &v }
+
+// TestExecutor_ReviewCarryForward_AFixRoundCannotWithdraw pins the retraction
+// list to the round type it was written for.
+//
+// withdrawn_findings lives in the findings schema every review turn shares, so
+// a fix-round rereview is offered the field too - and the schema's "answer
+// rounds only" description is guidance to the agent, never enforcement. A fix
+// round that claimed it would clear a selected finding with no coverage record
+// at all: exactly the no-op fix TestExecutor_ReviewCarryForward_NoOpFixKeepsFindingParked
+// exists to catch, taking a different route out of the outstanding set. Only a
+// finalize turn may retract; every other round stays on the coverage rule.
+func TestExecutor_ReviewCarryForward_AFixRoundCannotWithdraw(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			round++
+			if round == 1 {
+				return &StepOutcome{
+					NeedsApproval:   true,
+					Findings:        reviewCarryTwoFindings,
+					ReviewedPaths:   []string{"service.go", "cache.go"},
+					ReviewablePaths: []string{"service.go", "cache.go"},
+				}, nil
+			}
+			if err := os.WriteFile(filepath.Join(workDir, "unrelated.txt"), []byte("tidy\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			execGit(t, workDir, "add", "unrelated.txt")
+			execGit(t, workDir, "commit", "-m", "tidy unrelated code")
+			// The rereview never looked at service.go, so it has no coverage
+			// record to clear the selected finding with - and tries to retract
+			// it by name instead.
+			return &StepOutcome{
+				FixSummary:          "tidy unrelated code",
+				WithdrawnFindingIDs: []string{"review-1"},
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].FindingsJSON == nil {
+		t.Fatal("the outstanding set is empty: a fix round's retraction cleared a finding nothing verified")
+	}
+	if !strings.Contains(*steps[0].FindingsJSON, "review-1") {
+		t.Fatalf("a fix round withdrew a selected finding no round verified: %s", *steps[0].FindingsJSON)
+	}
+
+	parked, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parked.Status == types.RunCompleted {
+		t.Fatal("run completed over a finding a fix round retracted without verifying")
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}

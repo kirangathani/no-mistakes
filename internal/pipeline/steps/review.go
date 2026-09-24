@@ -519,7 +519,7 @@ Risk assessment (after listing all findings):
 		AutoFixable:         len(findings.Items) > 0,
 		Findings:            string(findingsJSON),
 		ReviewedPaths:       findings.ReviewedPaths,
-		WithdrawnFindingIDs: withdrawnFindingIDs(findings),
+		WithdrawnFindingIDs: withdrawnFindingIDs(sctx, findings),
 		ReviewablePaths:     reviewable,
 		FixSummary:          fixSummary,
 	})
@@ -747,8 +747,15 @@ func reviewAgentError(ctx context.Context, timeout time.Duration, prefix string,
 // withdrawnFindingIDs is the answer round's retraction list, reduced to the ids
 // the executor removes. A blank id is dropped: an entry that names nothing
 // cannot retract anything, and letting it through would clear on a typo.
-func withdrawnFindingIDs(findings Findings) []string {
-	if len(findings.WithdrawnFindings) == 0 {
+//
+// Only a finalize turn may retract. Every other round is held to the coverage
+// rule, and the shared findings schema offers withdrawn_findings to all of
+// them, so a fix-round rereview could otherwise clear a selected finding by
+// naming it - no coverage record, no positive verification, gate clean over a
+// defect nobody proved fixed. The schema's "answer rounds only" description is
+// guidance to the agent, never enforcement.
+func withdrawnFindingIDs(sctx *pipeline.StepContext, findings Findings) []string {
+	if !sctx.FinalizingAnswers || len(findings.WithdrawnFindings) == 0 {
 		return nil
 	}
 	ids := make([]string, 0, len(findings.WithdrawnFindings))

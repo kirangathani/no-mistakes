@@ -290,12 +290,6 @@ type DecisionReview struct {
 	Evidence   string `json:"evidence"`
 }
 
-// Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
-//
-// Scenarios and Verdict are the test step's live-validation contract. Both are
-// omitempty and both decode as their zero values from every findings payload
-// written before the contract existed, so an older recorded run still parses
-// and simply renders no scenario table.
 // WithdrawnFinding is one carried finding an answer round retracted, naming
 // the finding by the id it was carried under and why the answer disproved it.
 type WithdrawnFinding struct {
@@ -303,6 +297,12 @@ type WithdrawnFinding struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
+//
+// Scenarios and Verdict are the test step's live-validation contract. Both are
+// omitempty and both decode as their zero values from every findings payload
+// written before the contract existed, so an older recorded run still parses
+// and simply renders no scenario table.
 type Findings struct {
 	DecisionReviews []DecisionReview `json:"decision_reviews,omitempty"`
 	Items           []Finding        `json:"findings"`
