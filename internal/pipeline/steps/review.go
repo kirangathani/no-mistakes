@@ -68,7 +68,10 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// head inside the same run, and therefore the same RunSessions). Dropping
 	// it here - before any turn of this round runs - also survives a daemon
 	// restart, because Forget deletes the persisted row too.
-	convDir := reviewConversationDir(sctx)
+	// askDir gates whether the reviewer may ASK (config only); readDir gates
+	// reading a conversation that already exists (config, or files on disk).
+	askDir := reviewConversationDir(sctx)
+	convDir := reviewConversationReadDir(sctx)
 	resumingAnswers := sctx.FinalizingAnswers && !sctx.Fixing && convDir != ""
 	if !resumingAnswers {
 		sctx.Sessions.Forget(pipeline.SessionRoleReviewer)
@@ -250,7 +253,7 @@ Previous review findings to address:
 	if err != nil {
 		return nil, err
 	}
-	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction + reviewQuestionProtocolSection(convDir, asked)
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction + reviewQuestionProtocolSection(askDir, asked)
 
 	if len(decisions) > 0 {
 		historySection += decisionSection + recordedDecisionReviewRule
@@ -484,7 +487,12 @@ Risk assessment (after listing all findings):
 	// become ask-user findings, which is what parks the step in
 	// waiting-on-answers. The step never completes on its own with a question
 	// open; a human's approval still can, and the PR body says so.
-	conv, err := loadReviewConversation(sctx, convDir)
+	// Keyed on askDir, not the read dir: emitting a question finding is what
+	// PARKS the step, and a repository that has turned the conversation off
+	// must not have a fresh review inherit questions an earlier run asked.
+	// Delivering an answer to a finalize turn is the read-side case and is
+	// handled above; this is the ask-side one.
+	conv, err := loadReviewConversation(sctx, askDir)
 	if err != nil {
 		return nil, err
 	}

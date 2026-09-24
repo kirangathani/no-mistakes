@@ -394,6 +394,37 @@ retraction that is applied is written to the step log with the reason the turn
 gave, and recorded on the round, so a finding that disappears between rounds can
 be read back against the claim that removed it.
 
+### Turning the setting off does not strand a question already asked
+
+`review.conversation` answers two questions, and they are keyed differently.
+
+*May the reviewer ASK?* is keyed on the setting alone. With it off the review
+prompt carries no question protocol, no settled-questions section, no files are
+created, and the PR body publishes what it published before the feature existed.
+A repository that never opted in is byte-for-byte upstream.
+
+*May a conversation that already EXISTS be read and answered?* is keyed on the
+files being on disk. The setting is trusted-default-branch-only and is
+re-resolved on recovery from the current default-branch tip, so a maintainer who
+turns it off - or a trusted-config fetch that fails, which recovery resolves the
+same way - between the ask and the answer would otherwise make those questions
+permanently unanswerable.
+
+The two cases are distinguishable without ambiguity: a repository that never
+enabled the conversation cannot have a questions file, so the read side is off
+for it too. A file can only exist because an enabled turn wrote it.
+
+Both halves of the read side move together, and that is the point. The answer
+path accepts the answer, and the review step reads the same conversation for its
+finalize turn. Opening only the write side was tried and is worse than refusing:
+the answer lands on disk, the gate is released, and the finalize turn runs a
+plain review that never sees it - while the CLI reports that the reviewer resumed
+with the answer.
+
+Emitting a question finding stays on the ask side, because that is what PARKS the
+step: a repository that has turned the conversation off must not have a fresh
+review inherit questions an earlier run asked.
+
 ## What is persisted, and where the next cold reviewer reads it
 
 A mid-turn answer is not a gate response, so it cannot ride the existing

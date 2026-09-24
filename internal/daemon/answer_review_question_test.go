@@ -202,9 +202,10 @@ func TestAnswerReviewQuestionForAnUnknownQuestionDoesNotOpenOne(t *testing.T) {
 func TestAnswerReviewQuestionRefusesWhenTheConversationIsOff(t *testing.T) {
 	m, p, runID := answerFixtureWithConversation(t, false)
 
-	// Seeded exactly as the enabled path would seed it, so the refusal is the
-	// setting's doing rather than an empty channel's.
-	appendAgentQuestionLine(t, conversationDir(p, runID), `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
+	// Nothing on disk: a repository that never opted in cannot have a
+	// conversation, so the setting is the only thing that could accept an
+	// answer. A question that IS on disk was asked while the channel was open
+	// and stays answerable; that case has its own test below.
 
 	result, err := m.HandleAnswerReviewQuestion(runID, "q1", "keep", "captain")
 	if err == nil {
@@ -218,6 +219,36 @@ func TestAnswerReviewQuestionRefusesWhenTheConversationIsOff(t *testing.T) {
 	// a later enabled run would read as settled.
 	if answers, readErr := os.ReadFile(filepath.Join(conversationDir(p, runID), reviewqa.AnswersFile)); readErr == nil {
 		t.Fatalf("a refused answer was written to disk: %s", answers)
+	}
+}
+
+// TestAnswerReviewQuestionOnDiskQuestionSurvivesTheSettingBeingTurnedOff pins
+// the one exception to the opt-in refusal above.
+//
+// The reviewer asked while the channel was open - the file on disk is the proof
+// - and review.conversation was turned off, or a trusted-config fetch failed
+// and recovery resolved it the same way, before the answer landed. Refusing
+// then strands a parked run for good. The review step reads the same
+// conversation from disk for its finalize turn, so the answer reaches the
+// agent rather than merely unsticking the gate.
+func TestAnswerReviewQuestionOnDiskQuestionSurvivesTheSettingBeingTurnedOff(t *testing.T) {
+	m, p, runID := answerFixtureWithConversation(t, false)
+
+	appendAgentQuestionLine(t, conversationDir(p, runID), `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
+
+	result, err := m.HandleAnswerReviewQuestion(runID, "q1", "keep", "captain")
+	if err != nil {
+		t.Fatalf("a question already on disk must stay answerable after the setting is turned off: %v", err)
+	}
+	if result == nil || !result.OK {
+		t.Fatalf("result = %+v, want an accepted answer", result)
+	}
+	answers, readErr := os.ReadFile(filepath.Join(conversationDir(p, runID), reviewqa.AnswersFile))
+	if readErr != nil {
+		t.Fatalf("the accepted answer was not written to disk: %v", readErr)
+	}
+	if !strings.Contains(string(answers), "q1") {
+		t.Fatalf("the answer on disk does not carry its question id: %s", answers)
 	}
 }
 

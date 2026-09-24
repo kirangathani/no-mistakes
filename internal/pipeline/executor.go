@@ -2200,3 +2200,34 @@ func answerRoundCarriedFindings(answering bool, outstanding string) string {
 	}
 	return dropReviewQuestionFindingsJSON(outstanding)
 }
+
+// ReviewConversationAnswerDir is where an answer for this run may be appended,
+// or empty when no answer may be.
+//
+// It is the executor-side half of steps.reviewConversationReadDir and must stay
+// in step with it: one flag was answering two questions, and keying the answer
+// path on "may the reviewer ASK" is what stranded a parked run's questions when
+// review.conversation was turned off - or when a trusted-config fetch failed,
+// which recovery resolves the same way - between the ask and the answer.
+//
+// Opening this alone is not enough and was tried once: the review step also has
+// to READ the conversation, or the answer lands on disk, the gate is released,
+// and the finalize turn runs a plain review that never sees it while the CLI
+// reports the reviewer resumed. Both sides key on the file for that reason.
+//
+// The off-state guarantee is untouched: a repository that never enabled the
+// conversation has no questions file, so this returns "" and the answer is
+// refused by naming the setting exactly as before.
+func (e *Executor) ReviewConversationAnswerDir(runID string) string {
+	if e.ReviewConversationEnabled() {
+		return e.ReviewConversationDir(runID)
+	}
+	dir := reviewqa.Dir(e.runEvidenceDir(runID))
+	if dir == "" {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(dir, reviewqa.QuestionsFile)); err != nil {
+		return ""
+	}
+	return dir
+}

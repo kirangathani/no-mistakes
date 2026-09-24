@@ -57,12 +57,29 @@ func TestReviewStep_ResumeApprovalGateOnlyWhenTheConversationIsSettled(t *testin
 			seed:         func(t *testing.T, dir string) {},
 		},
 		{
-			name:         "the conversation being off resumes nothing",
+			// A repository that never opted in cannot have a conversation on
+			// disk, so this is the real off state and it must behave exactly
+			// as it did before the feature existed.
+			name:         "the conversation being off with nothing on disk resumes nothing",
+			conversation: false,
+			findings:     openQuestionGateFindings,
+			seed:         func(t *testing.T, dir string) {},
+		},
+		{
+			// The conversation was ON when the reviewer asked - the files on
+			// disk are the proof - and review.conversation was turned off (or
+			// a trusted-config fetch failed, which resolves the same way)
+			// before the answer landed. The questions are answerable and the
+			// finalize turn reads them from disk, so the resumer must fire or
+			// the race it exists to close strands exactly the run it was
+			// added for.
+			name:         "an answered conversation on disk resumes even with the setting off",
 			conversation: false,
 			findings:     openQuestionGateFindings,
 			seed: func(t *testing.T, dir string) {
 				appendQA(t, dir, "q1", "keep")
 			},
+			wantResume: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,8 +88,9 @@ func TestReviewStep_ResumeApprovalGateOnlyWhenTheConversationIsSettled(t *testin
 			if tc.conversation {
 				enableReviewConversation(sctx.Config)
 			}
-			// Seeded at the path the enabled feature uses, so the off case is
-			// the setting's doing and not a missing file.
+			// Seeded at the path the enabled feature uses, so an off case that
+			// seeds nothing is genuinely empty and one that seeds is genuinely
+			// a conversation an earlier, enabled turn left behind.
 			tc.seed(t, reviewqa.Dir(sctx.EvidenceDir))
 
 			action, resume, err := (&ReviewStep{}).ResumeApprovalGate(sctx, tc.findings)

@@ -3,6 +3,8 @@ package steps
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -41,6 +43,43 @@ func reviewConversationDir(sctx *pipeline.StepContext) string {
 		return ""
 	}
 	return reviewqa.Dir(sctx.EvidenceDir)
+}
+
+// reviewConversationReadDir is where an EXISTING conversation may be read from,
+// or empty when none may be.
+//
+// It is deliberately not reviewConversationDir, because one flag was answering
+// two different questions. "May the reviewer ASK?" must stay keyed on
+// review.conversation: an off repository's prompt carries no question protocol,
+// creates no files, and publishes the body it published before the feature
+// existed. "May an existing conversation be READ?" has no reason to be keyed on
+// it at all - the questions are already on disk, the reviewer already asked
+// them, and the only thing the setting can do at that point is strand them.
+//
+// review.conversation is trusted-default-branch-only and is re-resolved on
+// recovery from the current default-branch tip, so a maintainer who turns it
+// off - or a trusted-config fetch that fails, which resolves the same way -
+// while a run is parked on open questions used to make those questions
+// permanently unanswerable: the answer path refused, and even when it did not,
+// the finalize turn skipped its answers section and the answer reached no agent.
+//
+// The off-state guarantee is untouched, because the two cases are
+// distinguishable on disk. A repository that never enabled the conversation
+// cannot have a questions file, so this returns "" for it and every read-side
+// consumer behaves exactly as upstream does. A file can only exist if the
+// conversation was on when the reviewer wrote it.
+func reviewConversationReadDir(sctx *pipeline.StepContext) string {
+	if dir := reviewConversationDir(sctx); dir != "" {
+		return dir
+	}
+	if sctx == nil || strings.TrimSpace(sctx.EvidenceDir) == "" {
+		return ""
+	}
+	dir := reviewqa.Dir(sctx.EvidenceDir)
+	if _, err := os.Stat(filepath.Join(dir, reviewqa.QuestionsFile)); err != nil {
+		return ""
+	}
+	return dir
 }
 
 // loadReviewConversation reads the run's conversation, logging any bounded
@@ -538,7 +577,7 @@ func marshalSanitizedAnswerLine(a db.ReviewAnswer) string {
 //
 // Read-only and fails closed: an unreadable conversation leaves the gate parked.
 func (s *ReviewStep) ResumeApprovalGate(sctx *pipeline.StepContext, findingsJSON string) (types.ApprovalAction, bool, error) {
-	dir := reviewConversationDir(sctx)
+	dir := reviewConversationReadDir(sctx)
 	if dir == "" {
 		return "", false, nil
 	}

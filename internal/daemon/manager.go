@@ -1923,11 +1923,17 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	// A repository that has not turned the conversation on has no channel to
 	// answer into, and the reviewer was never told to ask, so say which setting
 	// would accept an answer rather than report a missing directory.
-	if !exec.ReviewConversationEnabled() {
-		return nil, fmt.Errorf("run %s has no review conversation: set review.conversation: true in .no-mistakes.yaml on the default branch to let the reviewer ask questions", runID)
-	}
-	dir := exec.ReviewConversationDir(runID)
+	// A question already on disk stays answerable even if review.conversation
+	// has since been turned off: the reviewer asked it while the channel was
+	// open, and the review step reads the same conversation from disk for the
+	// finalize turn, so the answer reaches it. A repository that never enabled
+	// the conversation has no questions file, so it is refused by naming the
+	// setting exactly as before.
+	dir := exec.ReviewConversationAnswerDir(runID)
 	if dir == "" {
+		if !exec.ReviewConversationEnabled() {
+			return nil, fmt.Errorf("run %s has no review conversation: set review.conversation: true in .no-mistakes.yaml on the default branch to let the reviewer ask questions", runID)
+		}
 		return nil, fmt.Errorf("run %s has no review conversation directory", runID)
 	}
 	// Snapshot what was OPEN before the append, because "nothing is open now"

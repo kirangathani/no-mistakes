@@ -829,6 +829,51 @@ func TestReviewStep_ConversationOffIsTodaysReview(t *testing.T) {
 // of files. Without this, turning the conversation back off would still park
 // the review on a stale question nobody can answer any more, because
 // `axi answer` refuses once the setting is off.
+// TestReviewStep_FinalizeTurnDeliversAnswersEvenWithTheSettingOff is the test an
+// earlier attempt at this did not have, and its absence is why that attempt
+// shipped broken: it asserted the answer was ACCEPTED, never that it ARRIVED.
+//
+// review.conversation is trusted-default-branch-only and is re-resolved on
+// recovery from the current default-branch tip, so a maintainer who turns it
+// off - or a trusted-config fetch that fails, which resolves the same way -
+// between the ask and the answer used to leave the finalize turn running a
+// plain review that had never heard of the question, while the CLI reported
+// the reviewer had resumed with the answer. Opening the write side alone is
+// worse than refusing; both sides key on the conversation being on disk.
+func TestReviewStep_FinalizeTurnDeliversAnswersEvenWithTheSettingOff(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := newStaticReviewAgent(cleanReviewJSON)
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	// Written exactly as the ENABLED path writes it, then the setting is off:
+	// the files on disk are the proof the channel was open when it was asked.
+	convDir := reviewqa.Dir(sctx.EvidenceDir)
+	if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"is the legacy route going?","options":["keep","remove"],"weight":"major"}`); err != nil {
+		t.Fatalf("seed question: %v", err)
+	}
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
+		t.Fatalf("seed answer: %v", err)
+	}
+	sctx.FinalizingAnswers = true
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatalf("finalize turn: %v", err)
+	}
+
+	prompt := lastReviewPrompt(t, ag)
+	if !strings.Contains(prompt, "Answers to the questions you asked in this pass") {
+		t.Fatalf("the finalize turn carried no answers section, so the answer reached no agent:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "keep") {
+		t.Fatalf("the answers section does not carry the answer itself:\n%s", prompt)
+	}
+	// The ask side stays off: this turn may READ what was asked, never invite
+	// a new question.
+	if strings.Contains(prompt, "Review question protocol") {
+		t.Fatalf("an off repository's finalize turn was told it may ask questions:\n%s", prompt)
+	}
+}
+
 func TestReviewStep_ConversationOffIgnoresQuestionsAlreadyOnDisk(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := newStaticReviewAgent(cleanReviewJSON)
