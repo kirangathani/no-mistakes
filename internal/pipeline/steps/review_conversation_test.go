@@ -848,10 +848,17 @@ func TestReviewStep_FinalizeTurnDeliversAnswersEvenWithTheSettingOff(t *testing.
 	// Written exactly as the ENABLED path writes it, then the setting is off:
 	// the files on disk are the proof the channel was open when it was asked.
 	convDir := reviewqa.Dir(sctx.EvidenceDir)
-	if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"is the legacy route going?","options":["keep","remove"],"weight":"major"}`); err != nil {
+	// Sentinel tokens, not prose: the base review prompt template already
+	// contains "keeps the component and hardens it", so an assertion on a word
+	// like "keep" is true whether or not the answer reached the turn.
+	const (
+		questionSentinel = "q1-question-sentinel-v1"
+		answerSentinel   = "q1-answer-sentinel-keep-v1"
+	)
+	if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"`+questionSentinel+`: is the legacy route going?","options":["keep","remove"],"weight":"major"}`); err != nil {
 		t.Fatalf("seed question: %v", err)
 	}
-	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: answerSentinel, AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatalf("seed answer: %v", err)
 	}
 	sctx.FinalizingAnswers = true
@@ -864,8 +871,11 @@ func TestReviewStep_FinalizeTurnDeliversAnswersEvenWithTheSettingOff(t *testing.
 	if !strings.Contains(prompt, "Answers to the questions you asked in this pass") {
 		t.Fatalf("the finalize turn carried no answers section, so the answer reached no agent:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "keep") {
+	if !strings.Contains(prompt, answerSentinel) {
 		t.Fatalf("the answers section does not carry the answer itself:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, questionSentinel) {
+		t.Fatalf("the answers section does not carry the question the answer settles:\n%s", prompt)
 	}
 	// The ask side stays off: this turn may READ what was asked, never invite
 	// a new question.
