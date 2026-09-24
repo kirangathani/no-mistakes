@@ -1596,3 +1596,247 @@ func outstandingIDs(t *testing.T, raw string) map[string]bool {
 	}
 	return ids
 }
+
+// withdrawnIDs is the retraction record a persisted round carries. It is the
+// round's own claim about what IT removed, so a round that retracted nothing
+// must carry none.
+func withdrawnIDs(t *testing.T, raw string) []string {
+	t.Helper()
+	parsed, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		t.Fatalf("parse findings: %v", err)
+	}
+	ids := make([]string, 0, len(parsed.WithdrawnFindings))
+	for _, w := range parsed.WithdrawnFindings {
+		ids = append(ids, w.ID)
+	}
+	return ids
+}
+
+// TestExecutor_ReviewCarryForward_ARetractionIsRecordedOnlyOnTheRoundThatMadeIt
+// covers the inheritance route. An answer round's retraction is stamped onto
+// the payload it persists, and that payload becomes the outstanding set the
+// NEXT round merges from - so without a per-round reset the merge copies the
+// record forward and a fix round that retracted nothing records a retraction,
+// on its row and on every row after it.
+func TestExecutor_ReviewCarryForward_ARetractionIsRecordedOnlyOnTheRoundThatMadeIt(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			round++
+			switch round {
+			case 1:
+				return &StepOutcome{
+					NeedsApproval:   true,
+					Findings:        reviewCarryTwoFindings,
+					ReviewedPaths:   []string{"service.go", "cache.go"},
+					ReviewablePaths: []string{"service.go", "cache.go"},
+				}, nil
+			case 2:
+				// The answer round retracts review-1 and re-parks on a finding
+				// of its own, so the record can be read before the next round.
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-3","severity":"warning","file":"cache.go","line":7,"description":"answer round finding","action":"ask-user"}],"summary":"answer"}`,
+					WithdrawnFindings: []types.WithdrawnFinding{
+						{ID: "review-1", Reason: "the answer settled it"},
+					},
+				}, nil
+			default:
+				// Reports nothing at all, so the outstanding set is rebuilt
+				// from itself - the merge's other branch, where an inherited
+				// record would ride along just the same.
+				return &StepOutcome{NeedsApproval: true, FixSummary: "silent round"}, nil
+			}
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		t.Fatal(err)
+	}
+	steps := waitForFindings(t, database, run.ID, "answer round finding")
+	if got := withdrawnIDs(t, *steps[0].FindingsJSON); len(got) != 1 || got[0] != "review-1" {
+		t.Fatalf("the answer round did not record the retraction it made: %v (%s)", got, *steps[0].FindingsJSON)
+	}
+
+	// The very next round inherits the outstanding set from that stamped
+	// payload. A second answer - the reviewer asked again and the operator
+	// answered again - dispatches no fix, so nothing re-merges the set on the
+	// way in; the round then reports nothing of its own, taking the merge
+	// branch that rebuilds the set from itself. Its row must carry no
+	// retraction: it made none.
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		t.Fatal(err)
+	}
+	rounds := waitForRounds(t, database, steps[0].ID, 3)
+	last := rounds[len(rounds)-1]
+	if last.FindingsJSON == nil {
+		t.Fatal("the silent round persisted no findings at all")
+	}
+	if got := withdrawnIDs(t, *last.FindingsJSON); len(got) != 0 {
+		t.Fatalf("a round that retracted nothing recorded %v; the record belongs to the round that made it: %s", got, *last.FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
+
+// TestExecutor_ReviewCarryForward_AnEmptyOutstandingSetRecordsNoRetraction
+// covers the second route, which the operator-finding regression cannot reach
+// because its outstanding set is never empty. When the gate carries only
+// question rows - the common case where the reviewer asks before it has
+// reported any code finding - the outstanding set is empty after the question
+// rows are dropped, so nothing is retractable and the executor applies nothing.
+// The agent's own unfiltered withdrawn_findings must not ride its payload into
+// the record as though the executor had applied it.
+func TestExecutor_ReviewCarryForward_AnEmptyOutstandingSetRecordsNoRetraction(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			round++
+			if round == 1 {
+				return &StepOutcome{
+					NeedsApproval:   true,
+					Findings:        `{"findings":[{"id":"question-q1","severity":"warning","description":"Review question awaiting an answer: is /v1 going?","action":"ask-user","category":"review-question"}],"summary":"a question"}`,
+					ReviewedPaths:   []string{"service.go"},
+					ReviewablePaths: []string{"service.go"},
+				}, nil
+			}
+			// The finalize turn names an id that was never outstanding. Its
+			// payload carries the agent's own withdrawn_findings verbatim.
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"review-1","severity":"warning","file":"service.go","line":3,"description":"finalize turn finding","action":"ask-user"}],"summary":"finalize","withdrawn_findings":[{"id":"ghost-1","reason":"never outstanding"}]}`,
+				WithdrawnFindings: []types.WithdrawnFinding{
+					{ID: "ghost-1", Reason: "never outstanding"},
+				},
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		t.Fatal(err)
+	}
+	steps := waitForFindings(t, database, run.ID, "finalize turn finding")
+	if got := withdrawnIDs(t, *steps[0].FindingsJSON); len(got) != 0 {
+		t.Fatalf("a retraction the executor never applied was recorded as if it had been: %v (%s)", got, *steps[0].FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
+
+// waitForFindings blocks until the step's persisted findings carry marker. The
+// gate status alone cannot say a round landed when consecutive rounds park the
+// same way, which is how an earlier version of these tests read a pre-round
+// snapshot and passed vacuously.
+func waitForFindings(t *testing.T, database *db.DB, runID, marker string) []*db.StepResult {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		steps, err := database.GetStepsByRun(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(steps) > 0 && steps[0].FindingsJSON != nil && strings.Contains(*steps[0].FindingsJSON, marker) {
+			return steps
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the round carrying %q never landed", marker)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitForRounds blocks until the step has persisted at least want rounds. A
+// round that reports nothing changes no marker, so its row is the only place
+// its arrival is visible.
+func waitForRounds(t *testing.T, database *db.DB, stepResultID string, want int) []*db.StepRound {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		rounds, err := database.GetRoundsByStep(stepResultID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rounds) >= want {
+			return rounds
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d rounds landed", len(rounds), want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestExecutor_ReviewCarryForward_ARecoveredRoundInheritsNoRetractionRecord
+// covers the branch the live loop cannot reach. In-process, the outstanding set
+// is taken BEFORE the retraction record is stamped, so only the persisted
+// payload carries it - but recovery rebuilds the outstanding set FROM that
+// persisted payload, so a recovered round starts holding a record it did not
+// make. A round that then reports nothing of its own rebuilds the set from
+// itself, and without a per-round reset it would persist that inherited
+// record as its own.
+func TestExecutor_ReviewCarryForward_ARecoveredRoundInheritsNoRetractionRecord(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	// Seeded exactly as a retracting answer round leaves the gate.
+	findings := `{"findings":[{"id":"review-2","severity":"warning","file":"cache.go","line":42,"description":"unbounded cache growth","action":"ask-user"}],"summary":"1 finding","withdrawn_findings":[{"id":"review-1","reason":"the answer settled it"}]}`
+	stepResult, recoveredRun := seedRecoveredReviewGate(t, database, run, findings, types.StepStatusAwaitingApproval, "")
+
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		return &StepOutcome{NeedsApproval: true, FixSummary: "silent recovered round"}, nil
+	}}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(ctx, recoveredRun, repo, t.TempDir()) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var respondErr error
+	for time.Now().Before(deadline) {
+		if respondErr = exec.Respond(types.StepReview, types.ActionAnswer, nil); respondErr == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if respondErr != nil {
+		t.Fatalf("respond to recovered review: %v", respondErr)
+	}
+
+	rounds := waitForRounds(t, database, stepResult.ID, 2)
+	last := rounds[len(rounds)-1]
+	if last.FindingsJSON == nil {
+		t.Fatal("the recovered round persisted no findings at all")
+	}
+	if got := withdrawnIDs(t, *last.FindingsJSON); len(got) != 0 {
+		t.Fatalf("a recovered round that retracted nothing inherited the record %v: %s", got, *last.FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}

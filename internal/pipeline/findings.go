@@ -656,6 +656,7 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPat
 		}
 		findings.ReviewedPaths = append([]string(nil), reviewedPaths...)
 		findings.DecisionReviews = currentDecisionReviews
+		findings.WithdrawnFindings = nil
 		encoded, err := types.MarshalFindingsJSON(findings)
 		if err != nil {
 			return existingRaw
@@ -672,6 +673,7 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPat
 	}
 	merged.ReviewedPaths = append([]string(nil), reviewedPaths...)
 	merged.DecisionReviews = currentDecisionReviews
+	merged.WithdrawnFindings = nil
 	seenDecisionIDs := make(map[string]bool)
 	items := merged.Items[:0]
 	for _, item := range merged.Items {
