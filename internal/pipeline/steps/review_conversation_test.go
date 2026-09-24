@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1248,4 +1249,84 @@ func TestReviewStep_UnreadableConversationFailsTheReview(t *testing.T) {
 			t.Fatalf("question findings without a conversation: %+v", got)
 		}
 	})
+}
+
+// TestReviewStep_FinalizeTurnCanActuallyRetractWhatItCarried crosses the one
+// boundary the carry-forward regressions in internal/pipeline never touch:
+// they set StepOutcome.WithdrawnFindingIDs on a fake step, so they pass just as
+// well when the review agent is never offered the field at all.
+//
+// The finalize prompt instructs the turn to name a disproved carried finding in
+// withdrawn_findings, and that retraction is the ONLY way such a finding leaves
+// the outstanding set. If the JSON schema handed to the same turn does not
+// declare the property, the instruction is unfollowable - decisively so under
+// the codex adapter, which injects additionalProperties:false into every object
+// of the review schema - and the carried set is re-injected verbatim on every
+// answer round, leaving the finding removable only by approving over it.
+//
+// So this drives a real finalize turn and asserts both halves: the schema the
+// step hands the agent declares the property, and a payload using it reaches
+// the outcome the executor reads.
+func TestReviewStep_FinalizeTurnCanActuallyRetractWhatItCarried(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	var handed agent.RunOpts
+	ag := &mockAgent{}
+	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		handed = opts
+		return &agent.Result{Output: []byte(`{"findings":[],"risk_level":"low","risk_rationale":"the answer disproved it","risk_scope":"source-or-external","reviewed_paths":["feature.txt"],"withdrawn_findings":[{"id":"review-1","reason":"the answer settled that /v1 is staying"}]}`)}, nil
+	}
+	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
+	convDir := reviewConversationDir(sctx)
+	if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"is /v1 going?","options":["keep","remove"],"weight":"major"}`); err != nil {
+		t.Fatalf("seed question: %v", err)
+	}
+	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AskOrdinal: 1}); err != nil {
+		t.Fatalf("append answer: %v", err)
+	}
+	sctx.FinalizingAnswers = true
+	sctx.CarriedFindings = `{"findings":[{"id":"review-1","severity":"warning","file":"feature.txt","line":1,"description":"PENDING ANSWER (q1): the legacy route is only wrong if /v1 is going","action":"ask-user"}],"summary":"1 carried finding"}`
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("finalize turn: %v", err)
+	}
+
+	// The schema is a machine-consumed contract with the agent, so it is read
+	// as one: decoded and interrogated for meaning, never grepped.
+	var schema struct {
+		Properties map[string]struct {
+			Type  string `json:"type"`
+			Items struct {
+				Type       string              `json:"type"`
+				Properties map[string]struct{} `json:"properties"`
+				Required   []string            `json:"required"`
+			} `json:"items"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(handed.JSONSchema, &schema); err != nil {
+		t.Fatalf("the review step handed the agent an unparseable schema: %v", err)
+	}
+	withdrawn, ok := schema.Properties["withdrawn_findings"]
+	if !ok {
+		t.Fatalf("the review turn's schema declares no withdrawn_findings, so the finalize prompt asks for a field the agent cannot emit; declared: %v", schema.Properties)
+	}
+	if withdrawn.Type != "array" || withdrawn.Items.Type != "object" {
+		t.Fatalf("withdrawn_findings is %q of %q, want an array of objects", withdrawn.Type, withdrawn.Items.Type)
+	}
+	for _, field := range []string{"id", "reason"} {
+		if _, ok := withdrawn.Items.Properties[field]; !ok {
+			t.Errorf("a withdrawal cannot carry %q, so the executor cannot match it to a carried finding", field)
+		}
+	}
+	for _, name := range schema.Required {
+		if name == "withdrawn_findings" {
+			t.Fatal("withdrawn_findings is required, so an ordinary review round with nothing to retract can no longer validate")
+		}
+	}
+
+	if got := outcome.WithdrawnFindingIDs; len(got) != 1 || got[0] != "review-1" {
+		t.Fatalf("the retraction the finalize turn emitted did not reach the executor: %v", got)
+	}
 }
