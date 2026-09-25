@@ -341,8 +341,12 @@ func TestCarryOriginEvidenceRefusesATraversingRunID(t *testing.T) {
 		t.Fatalf("the traversal target must be reachable or this case proves nothing: %v", err)
 	}
 
+	// The artifact NAMES the decoy file rather than an absent one, so removing
+	// the guard is what this case detects: with an artifact the traversal
+	// target does not hold, every id fails on the missing file instead and the
+	// case passes whether the guard exists or not.
 	for _, id := range []string{"../secrets", "..", ".", "sub/dir", "  "} {
-		if _, err := carryOriginEvidence(sctx, id, []types.TestArtifact{{Path: "x.png"}}); err == nil {
+		if _, err := carryOriginEvidence(sctx, id, []types.TestArtifact{{Path: "id_rsa"}}); err == nil {
 			t.Errorf("originating run %q was accepted as a path segment", id)
 		}
 	}

@@ -277,8 +277,12 @@ func sameRunIntent(current *string, prior string) bool {
 func reuseDecision(priorRunID string, prior Findings) testEvidenceDecision {
 	// The originating run is carried structurally rather than parsed back out
 	// of the predecessor's reason: a reused verdict is itself reusable, and
-	// only the run that actually drove the agent holds artifacts, so a chain
-	// has to keep naming that run rather than the intermediate it read from.
+	// naming the run that actually drove the agent keeps every link in a chain
+	// pointing at one stable run instead of at whichever intermediate it
+	// happened to read from. Intermediates do hold copies of the carried files
+	// (carryArtifactFiles puts one in every reusing run's directory), but
+	// which intermediate a verdict came through is an accident of scheduling,
+	// and the origin is what the PR's provenance line has to name.
 	origin := strings.TrimSpace(prior.EvidenceOriginRunID)
 	if origin == "" {
 		origin = priorRunID
@@ -373,7 +377,11 @@ func anyFileBackedArtifact(artifacts []types.TestArtifact) bool {
 // absolute artifact path only when it resolves under the repository root or
 // under THIS run's evidence directory (sanitizeAbsoluteArtifactPath). Carried
 // unchanged, every such path is dropped at render time and the carry silently
-// does nothing.
+// does nothing. Note that evidenceRoot here is the SHARED root holding every
+// run's directory (dest's parent), not prsummary.go's
+// testingSummaryOptions.evidenceRoot, which is this one run's directory; the
+// two meet only through sanitizeAbsoluteArtifactPath, which is why a carried
+// path has to end up under dest.
 //
 // Which run directory a recorded path names cannot be assumed. On the third run
 // of a branch the predecessor was itself a reuse, so its paths already name ITS
