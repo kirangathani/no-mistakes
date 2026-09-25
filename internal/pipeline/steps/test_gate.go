@@ -338,24 +338,11 @@ func carryOriginEvidence(sctx *pipeline.StepContext, originRunID string, artifac
 		return nil, errors.New("this run has no evidence directory")
 	}
 	// A verdict evidenced only by url or content artifacts has no file to
-	// copy, and demanding a populated originating directory would then throw
-	// its scenarios away for nothing.
+	// copy, so it never depends on the originating directory at all.
 	if !anyFileBackedArtifact(artifacts) {
 		return artifacts, nil
 	}
-	src := filepath.Join(filepath.Dir(dest), originRunID)
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return nil, fmt.Errorf("read the originating run's evidence: %w", err)
-	}
-	if len(entries) == 0 {
-		return nil, errors.New("the originating run's evidence directory is empty")
-	}
-	carried, ok := carryArtifactFiles(artifacts, src, dest)
-	if !ok {
-		return nil, errors.New("no carried file artifact arrived in this run's evidence directory")
-	}
-	return carried, nil
+	return carryArtifactFiles(artifacts, filepath.Join(filepath.Dir(dest), originRunID), dest)
 }
 
 // anyFileBackedArtifact reports whether any artifact names a local file, which
@@ -402,11 +389,15 @@ func anyFileBackedArtifact(artifacts []types.TestArtifact) bool {
 // artifacts too, and the renderer shows those with nothing on disk, so they
 // are carried untouched and a verdict evidenced entirely that way needs no
 // copy at all.
-func carryArtifactFiles(artifacts []types.TestArtifact, originDir, dest string) ([]types.TestArtifact, bool) {
+func carryArtifactFiles(artifacts []types.TestArtifact, originDir, dest string) ([]types.TestArtifact, error) {
 	evidenceRoot := filepath.Dir(dest)
 	kept := make([]types.TestArtifact, 0, len(artifacts))
 	copied := map[string]bool{}
 	fileBacked, survived := 0, 0
+	// The first copy failure is what an operator asks about - most often the
+	// originating directory aged out under test.evidence.retention - so it is
+	// carried into the rejection rather than swallowed with the artifact.
+	var firstErr error
 	for _, artifact := range artifacts {
 		recorded := strings.TrimSpace(artifact.Path)
 		if recorded == "" {
@@ -422,6 +413,9 @@ func carryArtifactFiles(artifacts []types.TestArtifact, originDir, dest string) 
 		dstPath := filepath.Join(dest, rel)
 		if !copied[rel] {
 			if err := copyEvidenceFile(filepath.Join(originDir, rel), dstPath); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
 				continue
 			}
 			copied[rel] = true
@@ -437,9 +431,12 @@ func carryArtifactFiles(artifacts []types.TestArtifact, originDir, dest string) 
 	}
 	// A carry "failed" only when files were expected and none of them arrived.
 	if fileBacked > 0 && survived == 0 {
-		return nil, false
+		if firstErr != nil {
+			return nil, fmt.Errorf("no carried file artifact arrived in this run's evidence directory: %w", firstErr)
+		}
+		return nil, errors.New("no carried file artifact arrived in this run's evidence directory")
 	}
-	return kept, true
+	return kept, nil
 }
 
 // carriedEvidenceRelPath reduces one recorded artifact path to its location
