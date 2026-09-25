@@ -143,6 +143,14 @@ func TestDefaultNonProductPathsCoverEveryDeclaredClass(t *testing.T) {
 			t.Errorf("DefaultNonProductPaths is missing %q", pattern)
 		}
 	}
+	// A composite action is shipped runtime code that a workflow invokes, not
+	// a description of when CI runs, so it does not earn a workflow file's
+	// skip. This repository is its own counterexample: .github/actions/
+	// require-no-mistakes is the PR enforcement gate, with Go regression
+	// suites at the repository root.
+	if slices.Contains(DefaultNonProductPaths, ".github/actions/**") {
+		t.Error("DefaultNonProductPaths must not skip .github/actions/**: a composite action is shipped runtime code")
+	}
 	// A lockfile change swaps the dependency versions the product ships and
 	// runs, and a lockfile-only diff is the ordinary shape of a dependency
 	// bump. Listing one here would hand exactly those runs an automatic

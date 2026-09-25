@@ -847,7 +847,7 @@ Which changed paths do **not** count as product or UI files, and therefore wheth
 | | |
 | --- | --- |
 | Type | `string[]` (glob patterns) |
-| Default | Documentation and markdown, test files and test fixtures, CI workflow definitions, scripts and tooling directories, and `.no-mistakes.yaml` |
+| Default | Documentation and markdown, test files and test fixtures, CI workflow files, scripts and tooling directories, and `.no-mistakes.yaml` |
 
 This is the classification the Test step's diff-class gate reads. It only takes effect when the gate is enabled with [`test.evidence_gate: diff-class`](#testevidence_gate); with the gate at its default it is parsed and validated but never consulted. The configured [`commands.test`](#commandstest) is unaffected and still runs on every run; what this bounds is the separate live-evidence turn, which stands the product up and drives end-user scenarios. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the behavior this selects, including the reuse of an earlier `go` verdict on the same branch and the fact that a reused verdict publishes no live-validation claim for the head it did not drive.
 

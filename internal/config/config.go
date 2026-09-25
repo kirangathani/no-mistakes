@@ -920,7 +920,7 @@ type TestRaw struct {
 
 // DefaultNonProductPaths is the built-in answer to "which changed paths cannot
 // carry a live-drivable product change": documentation and markdown, test
-// files and test fixtures, CI workflow definitions, scripts and tooling
+// files and test fixtures, CI workflow files, scripts and tooling
 // directories, and the pipeline's own config file. A repository replaces the
 // whole list through test.non_product_paths.
 //
@@ -948,8 +948,14 @@ var DefaultNonProductPaths = []string{
 	"*.spec.js", "*.spec.ts", "*.spec.jsx", "*.spec.tsx",
 	// test fixtures
 	"**/testdata/**", "**/fixtures/**", "**/__fixtures__/**", "**/__snapshots__/**",
-	// CI workflow definitions
-	".github/workflows/**", ".github/actions/**", ".gitlab-ci.yml",
+	// CI workflow definitions. Only the workflow files themselves: a composite
+	// action under .github/actions/ is shipped runtime code that a workflow
+	// invokes, not a description of when CI runs. This repository is its own
+	// counterexample - .github/actions/require-no-mistakes is the PR
+	// enforcement gate, with Go regression suites at the repository root and
+	// its own AGENTS.md section - so skipping live validation for a change to
+	// one would skip validating the product.
+	".github/workflows/**", ".gitlab-ci.yml",
 	".circleci/**", "azure-pipelines.yml", "Jenkinsfile",
 	// scripts and tooling directories
 	"scripts/**", "tools/**", "hack/**",
