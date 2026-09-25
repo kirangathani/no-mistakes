@@ -260,7 +260,7 @@ Previous review findings to address:
 	if err != nil {
 		return nil, err
 	}
-	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction + reviewQuestionProtocolSection(askDir, asked)
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
 
 	if len(decisions) > 0 {
 		historySection += decisionSection + recordedDecisionReviewRule
@@ -386,7 +386,7 @@ Risk assessment (after listing all findings):
 - Set risk_level to "medium" if the change has room to improve but is safe to merge first with concerns addressed as follow-ups.
 - Set risk_level to "high" if the change should not be merged without explicit human approval - it is fundamental, risky, ambiguous, or has strong negative signals.
 - Provide a one-sentence risk_rationale explaining why you chose that risk level.
-- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s%s`,
+- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s%s%s`,
 		branch,
 		baseSHA,
 		sctx.Run.HeadSHA,
@@ -396,6 +396,12 @@ Risk assessment (after listing all findings):
 		historySection,
 		pathInstructions,
 		agent.MemoryFilesRule,
+		// LAST, so the on-prompt is the off-prompt plus this section and
+		// nothing else - the append-only property
+		// TestReviewStep_ConversationOffIsTodaysReview pins. It used to sit at
+		// the end of historySection, which upstream's later MemoryFilesRule
+		// then followed, inserting the protocol mid-prompt instead.
+		reviewQuestionProtocolSection(askDir, asked),
 	)
 
 	// A review PASS keeps one session; a review ROUND never inherits another
