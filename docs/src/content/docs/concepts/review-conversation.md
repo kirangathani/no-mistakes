@@ -327,6 +327,8 @@ fixer and survives a daemon restart, because the session id is persisted in
 | In-run fix round (`sctx.Fixing`) | cold, and the `reviewer` session is dropped first | same reason |
 | A restart back to review (a CI repair's `RestartFrom`) | fresh, the stored identity dropped first | it re-enters the step on a new head inside the same run, so the identity in hand reviewed the OLD head |
 
+The table assumes the default [`session_reuse: true`](/no-mistakes/reference/global-config/#session_reuse). With it off no reviewer identity is persisted and the finalize turn runs cold like every other turn; it still receives the answers, because the finalize prompt is the whole review prompt plus them.
+
 `RunSessions` is keyed by `(run, role)`, so an author push that supersedes the
 run starts a new run and therefore a cold reviewer with no extra work. Within a
 run the rule is stated as a single narrow permission rather than a list of
