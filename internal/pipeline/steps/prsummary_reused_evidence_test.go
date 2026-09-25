@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -432,6 +433,96 @@ func TestCarryOriginEvidenceDoesNotCarrySymlinks(t *testing.T) {
 	}
 	if len(carried) != 1 || filepath.Base(carried[0].Path) != "checkout.png" {
 		t.Fatalf("carried = %+v, want only the real screenshot", carried)
+	}
+}
+
+// A run's evidence directory is not an artifact bucket - it is the run's
+// evidence ROOT, and other parts of the pipeline keep per-run state under it.
+// The review conversation lives at reviewqa.Dir(<evidence dir>), and copying
+// the originating directory wholesale replaced THIS run's questions and
+// answers with an earlier run's, which the PR body then published as this
+// review's conversation. Only the files the carried artifacts NAME are copied.
+func TestCarryOriginEvidenceLeavesThisRunsOtherStateAlone(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "run-1")
+	dest := filepath.Join(root, "run-2")
+	for _, dir := range []string{reviewqa.Dir(origin), reviewqa.Dir(dest)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(origin, "checkout.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seed := map[string]string{
+		filepath.Join(reviewqa.Dir(origin), "questions.ndjson"): `{"id":"q1","question":"run one's question"}`,
+		filepath.Join(reviewqa.Dir(origin), "answers.ndjson"):   `{"id":"q1","answer":"run one's answer"}`,
+		filepath.Join(reviewqa.Dir(dest), "questions.ndjson"):   `{"id":"q2","question":"this run's question"}`,
+		filepath.Join(reviewqa.Dir(dest), "answers.ndjson"):     `{"id":"q2","answer":"this run's answer"}`,
+	}
+	for path, content := range seed {
+		if err := os.WriteFile(path, []byte(content+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sctx := &pipeline.StepContext{EvidenceDir: dest}
+
+	carried, err := carryOriginEvidence(sctx, "run-1", []types.TestArtifact{
+		{Label: "checkout", Path: filepath.Join(origin, "checkout.png")},
+	})
+	if err != nil {
+		t.Fatalf("carrying evidence forward: %v", err)
+	}
+	wantPath := filepath.Join(dest, "checkout.png")
+	if len(carried) != 1 || carried[0].Path != wantPath {
+		t.Fatalf("carried = %+v, want the screenshot rebased onto %q", carried, wantPath)
+	}
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("the real evidence file must still arrive: %v", err)
+	}
+	for _, name := range []string{"questions.ndjson", "answers.ndjson"} {
+		path := filepath.Join(reviewqa.Dir(dest), name)
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := seed[path] + "\n"; string(got) != want {
+			t.Errorf("%s = %q, want this run's own %q", name, got, want)
+		}
+	}
+}
+
+// An artifact path that names something this run already wrote is refused
+// rather than overwritten: the recorded artifacts come from another run, and
+// a truncating copy would otherwise destroy this run's own evidence file.
+func TestCarryOriginEvidenceNeverOverwritesAnExistingFile(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "run-1")
+	dest := filepath.Join(root, "run-2")
+	for _, dir := range []string{origin, dest} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(origin, "checkout.png"), []byte("run one's png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "checkout.png"), []byte("this run's png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx := &pipeline.StepContext{EvidenceDir: dest}
+
+	if _, err := carryOriginEvidence(sctx, "run-1", []types.TestArtifact{
+		{Label: "checkout", Path: filepath.Join(origin, "checkout.png")},
+	}); err == nil {
+		t.Fatal("a carry that cannot happen without an overwrite must fail, not clobber this run's evidence")
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "checkout.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "this run's png" {
+		t.Fatalf("this run's evidence file = %q, want it untouched", got)
 	}
 }
 

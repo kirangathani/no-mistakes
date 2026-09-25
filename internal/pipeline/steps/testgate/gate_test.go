@@ -35,6 +35,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -619,6 +620,77 @@ func TestTestStep_ReusesAGoVerdictRecordedAtThisRunsOwnHead(t *testing.T) {
 	}
 	if findings.TestedHeadSHA != head {
 		t.Fatalf("tested head = %q, want the head the scenarios were driven at %q", findings.TestedHeadSHA, head)
+	}
+}
+
+// TestTestStep_ReuseLeavesThisRunsReviewConversationAlone: the run's evidence
+// directory is its evidence ROOT, not an artifact bucket, and the review
+// conversation lives inside it at reviewqa.Dir. Carrying the originating run's
+// directory wholesale replaced THIS run's questions and answers with an earlier
+// run's, which the PR body then published as this review's conversation - and
+// with an earlier run's question reading as open at a gate this run's operator
+// never saw. Only the files the carried artifacts name are copied.
+func TestTestStep_ReuseLeavesThisRunsReviewConversationAlone(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := stepstest.SetupGitRepo(t)
+	validated := commitFiles(t, dir, "product change", map[string]string{
+		"internal/checkout/checkout.go": "package checkout\n",
+	})
+	head := commitFiles(t, dir, "docs follow-up", map[string]string{"docs/guide.md": "# guide\n"})
+	ag := gateAgent()
+	sctx := gateContext(t, ag, dir, baseSHA, head)
+	priorRunID := recordPriorGoVerdict(t, sctx, validated)
+
+	priorDir := filepath.Join(filepath.Dir(sctx.EvidenceDir), priorRunID)
+	writeConversation(t, priorDir, "q1", "the originating run's question")
+	writeConversation(t, sctx.EvidenceDir, "q2", "this run's own question")
+
+	outcome, err := (&steps.TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.Calls) != 0 {
+		t.Fatalf("evidence agent invocations = %d, want 0", len(ag.Calls))
+	}
+	// The real evidence still arrives, so this is not passing by not carrying.
+	findings := parseOutcomeFindings(t, outcome)
+	wantPath := filepath.Join(sctx.EvidenceDir, "checkout.png")
+	if len(findings.Artifacts) != 1 || findings.Artifacts[0].Path != wantPath {
+		t.Fatalf("artifacts = %+v, want one rebased onto %q", findings.Artifacts, wantPath)
+	}
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("the originating run's evidence file did not reach this run's directory: %v", err)
+	}
+	for name, want := range conversationContents("q2", "this run's own question") {
+		got, err := os.ReadFile(filepath.Join(reviewqa.Dir(sctx.EvidenceDir), name))
+		if err != nil {
+			t.Fatalf("reading this run's %s: %v", name, err)
+		}
+		if string(got) != want {
+			t.Errorf("this run's %s = %q, want its own %q", name, got, want)
+		}
+	}
+}
+
+// writeConversation seeds a run's review conversation the way the reviewer and
+// the daemon's answer handler do, under the run's own evidence directory.
+func writeConversation(t *testing.T, evidenceDir, questionID, question string) {
+	t.Helper()
+	dir := reviewqa.Dir(evidenceDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range conversationContents(questionID, question) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func conversationContents(questionID, question string) map[string]string {
+	return map[string]string{
+		"questions.ndjson": `{"id":"` + questionID + `","question":"` + question + `"}` + "\n",
+		"answers.ndjson":   `{"id":"` + questionID + `","answer":"answered"}` + "\n",
 	}
 }
 
