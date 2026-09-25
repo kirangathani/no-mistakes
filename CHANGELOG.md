@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.83.2](https://github.com/kunchenguid/no-mistakes/compare/v1.83.1...v1.83.2) (2026-09-25)
+
+
+### Bug Fixes
+
+* **pipeline:** reconcile mirrors from a run's last published head ([#1193](https://github.com/kunchenguid/no-mistakes/issues/1193)) ([fd89fe8](https://github.com/kunchenguid/no-mistakes/commit/fd89fe842a6bdc4bf731e8f20599436581b274e6))
+* **pipeline:** require workarounds before marking Test scenarios untested ([#1201](https://github.com/kunchenguid/no-mistakes/issues/1201)) ([e15cfad](https://github.com/kunchenguid/no-mistakes/commit/e15cfad17e91fbdcc2864ac641f568598eacb336))
+* **pipeline:** review memory-file changes without blocking them ([#1203](https://github.com/kunchenguid/no-mistakes/issues/1203)) ([844ac2f](https://github.com/kunchenguid/no-mistakes/commit/844ac2fe2d2115f66ab9617e0ab191a837b4280a))
+
+## [1.83.1](https://github.com/kunchenguid/no-mistakes/compare/v1.83.0...v1.83.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **paths:** resolve gate hook helpers' NM_HOME from the gate, not the environment ([#1187](https://github.com/kunchenguid/no-mistakes/issues/1187)) ([416215c](https://github.com/kunchenguid/no-mistakes/commit/416215ce03ef5bd93b3e685d79ff76a8dacb0a9c))
+* **pipeline:** keep agent memory files out of automated edits ([#1189](https://github.com/kunchenguid/no-mistakes/issues/1189)) ([a2ba538](https://github.com/kunchenguid/no-mistakes/commit/a2ba538bfd28b597b47aad0a309726e095d55722))
+
+## [1.83.0](https://github.com/kunchenguid/no-mistakes/compare/v1.82.0...v1.83.0) (2026-09-24)
+
+
+### Features
+
+* **config:** per-repository machine-local commit and title overrides ([#1179](https://github.com/kunchenguid/no-mistakes/issues/1179)) ([15a6204](https://github.com/kunchenguid/no-mistakes/commit/15a62047b61d6dee0532823a79b987f29671ce5f))
+
+
+### Bug Fixes
+
+* **gate:** detect fork-as-origin layout and refuse with --fork-url guidance ([#1183](https://github.com/kunchenguid/no-mistakes/issues/1183)) ([a7ab68b](https://github.com/kunchenguid/no-mistakes/commit/a7ab68b144de59baf11595b8a463370072aaf62a))
+* **pipeline:** resolve branch base against freshly fetched base-branch tip ([#1147](https://github.com/kunchenguid/no-mistakes/issues/1147)) ([de50789](https://github.com/kunchenguid/no-mistakes/commit/de5078977e24f8752d88b8527221d8e15a1b9bcf))
+* **scm:** read jobless action_required workflow runs as awaiting maintainer approval ([#1185](https://github.com/kunchenguid/no-mistakes/issues/1185)) ([95c1ec7](https://github.com/kunchenguid/no-mistakes/commit/95c1ec78a8df491283196ae7dd6c648e7a3b521f)), closes [#1182](https://github.com/kunchenguid/no-mistakes/issues/1182)
+
 ## [1.82.0](https://github.com/kunchenguid/no-mistakes/compare/v1.81.0...v1.82.0) (2026-09-23)
 
 
