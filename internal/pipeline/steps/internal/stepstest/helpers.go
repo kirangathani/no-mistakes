@@ -302,7 +302,7 @@ func FakeCLIBinDir(t *testing.T) string {
 // test binary as those names was ~0.8s per spawn and dominated CI-monitor tests.
 var fakeCLIHelperPath string
 
-func Init() (func() error, error) {
+func initFakeCLI() (func() error, error) {
 	root, err := findModuleRoot()
 	if err != nil {
 		return nil, err
