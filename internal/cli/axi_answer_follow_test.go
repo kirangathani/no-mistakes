@@ -84,12 +84,20 @@ func tickingSubscribe(ctx context.Context, _ json.RawMessage) (ipc.StreamFunc, e
 }
 
 func reviewParkedOn(t *testing.T, fx *axiTimeoutFixture, status types.StepStatus, items ...types.Finding) func() *ipc.RunInfo {
+	return reviewParkedAtRound(t, fx, status, 0, items...)
+}
+
+// reviewParkedAtRound is reviewParkedOn with the step's persisted round count,
+// which is what tells a re-park apart from the park an answer just released
+// when both carry the same status.
+func reviewParkedAtRound(t *testing.T, fx *axiTimeoutFixture, status types.StepStatus, round int, items ...types.Finding) func() *ipc.RunInfo {
 	raw := findingsJSON(t, items, "review")
 	return func() *ipc.RunInfo {
 		run := fx.running()
 		run.Steps = []ipc.StepResultInfo{{
 			StepName:     types.StepReview,
 			Status:       status,
+			RoundCount:   round,
 			FindingsJSON: &raw,
 		}}
 		return run
@@ -272,5 +280,68 @@ func TestAxiAnswer_LastAnswerFollowsAFixReviewQuestionPark(t *testing.T) {
 	}
 	if strings.Contains(out, "question-q1") {
 		t.Fatalf("returned the fix_review gate the answer just released:\n%s", out)
+	}
+}
+
+// The finalize turn can park again at the same status before any read observes
+// the review step running. Keyed on the park status alone, that new gate read
+// as the one this answer had just released, so the caller waited until --wait
+// elapsed instead of being handed the decision it has to make.
+func TestAxiAnswer_ReparkAtTheSameStatusIsReturnedAsTheNextGate(t *testing.T) {
+	var fx *axiTimeoutFixture
+	var once sync.Once
+	var released, repark func() *ipc.RunInfo
+	build := func() {
+		released = reviewParkedAtRound(t, fx, types.StepStatusAwaitingApproval, 1, reviewQuestion("q1"))
+		repark = reviewParkedAtRound(t, fx, types.StepStatusAwaitingApproval, 2, reviewCodeFinding())
+	}
+	fx, _ = newAnswerFollowFixture(t, "", closedLastResumed, []answerPhase{
+		{run: func() *ipc.RunInfo { once.Do(build); return repark() }},
+	})
+	// The park the answer releases is read before the answer is sent, so its
+	// round is the one the wait leaves.
+	fx.setGetActive(func(context.Context) (*ipc.RunInfo, error) {
+		once.Do(build)
+		return released(), nil
+	})
+
+	started := time.Now()
+	out, err := executeCmd("axi", "answer", "--question", "q1", "--answer", "Keep it", "--wait", "6s")
+	if err != nil {
+		t.Fatalf("axi answer: %v\n%s", err, out)
+	}
+	for _, want := range []string{"gate:", "review-1", "calls os.Exit"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("re-park at the same status was not returned as the next gate (missing %q):\n%s", want, out)
+		}
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("answer waited %s for a gate that was already parked", elapsed)
+	}
+}
+
+// An older daemon has no closed_last field, so it reads as false. It resumes
+// the reviewer only when the last open question closed, so reviewer_resumed is
+// the same signal there and must earn the same follow.
+func TestAxiAnswer_ResumedWithoutClosedLastStillFollowsTheRun(t *testing.T) {
+	var fx *axiTimeoutFixture
+	var once sync.Once
+	var next func() *ipc.RunInfo
+	fx, _ = newAnswerFollowFixture(t, "", ipc.AnswerReviewQuestionResult{OK: true, Resumed: true}, []answerPhase{
+		{until: 150 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
+		{run: func() *ipc.RunInfo {
+			once.Do(func() { next = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewCodeFinding()) })
+			return next()
+		}},
+	})
+
+	out, err := executeCmd("axi", "answer", "--question", "q1", "--answer", "Keep it", "--wait", "10s")
+	if err != nil {
+		t.Fatalf("axi answer: %v\n%s", err, out)
+	}
+	for _, want := range []string{"gate:", "review-1", "calls os.Exit"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("a resumed reviewer without closed_last was not followed (missing %q):\n%s", want, out)
+		}
 	}
 }
