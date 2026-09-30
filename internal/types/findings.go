@@ -319,14 +319,31 @@ type WithdrawnFinding struct {
 // written before the contract existed, so an older recorded run still parses
 // and simply renders no scenario table.
 type Findings struct {
-	Items          []Finding      `json:"findings"`
-	Summary        string         `json:"summary"`
-	Tested         []string       `json:"tested,omitempty"`
-	TestingSummary string         `json:"testing_summary,omitempty"`
-	Artifacts      []TestArtifact `json:"artifacts,omitempty"`
-	Scenarios      []TestScenario `json:"scenarios,omitempty"`
-	Verdict        string         `json:"verdict,omitempty"`
-	TestedHeadSHA  string         `json:"tested_head_sha,omitempty"`
+	Items   []Finding `json:"findings"`
+	Summary string    `json:"summary"`
+	// ReviewedPaths is the review step's coverage record: the changed files the
+	// review turn actually examined and judged. It is the positive-verification
+	// signal that lets a finding the operator selected for a fix leave the
+	// outstanding set (see pipeline.resolveVerifiedFindingsJSON). A review turn
+	// that does not list a path has not proven anything about it, so silence is
+	// never read as resolution. Empty on every non-review payload.
+	ReviewedPaths []string `json:"reviewed_paths,omitempty"`
+	// WithdrawnFindings is an answer round's explicit re-adjudication: the
+	// carried findings the reviewer now says no longer hold, each with its
+	// reason. On an answer round a carried finding leaves the outstanding set
+	// ONLY by appearing here. Silence keeps it, so covering a file can no
+	// longer clear an unrelated finding in it. Empty on every other payload.
+	WithdrawnFindings []WithdrawnFinding `json:"withdrawn_findings,omitempty"`
+	Tested            []string           `json:"tested,omitempty"`
+	TestingSummary    string             `json:"testing_summary,omitempty"`
+	Artifacts         []TestArtifact     `json:"artifacts,omitempty"`
+	Scenarios         []TestScenario     `json:"scenarios,omitempty"`
+	Verdict           string             `json:"verdict,omitempty"`
+	TestedHeadSHA     string             `json:"tested_head_sha,omitempty"`
+	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
+	// unvalidated-work check measured from, carried so a repeated cut before any
+	// evidence turn completes re-measures from that same head.
+	UnvalidatedSinceSHA string `json:"unvalidated_since_sha,omitempty"`
 	// EvidenceSource and EvidenceReason record which path the Test step's
 	// diff-class gate took (see the TestEvidenceSource* constants) and the
 	// one-line human account of why, including the prior run id and evidence
@@ -369,56 +386,6 @@ type HandoffOutcome struct {
 }
 
 type findingsWire struct {
-	Items          []Finding      `json:"findings"`
-	Legacy         []Finding      `json:"items"`
-	Summary        string         `json:"summary"`
-	Tested         []string       `json:"tested"`
-	TestingSummary string         `json:"testing_summary"`
-	Artifacts      []TestArtifact `json:"artifacts"`
-	Scenarios      []TestScenario `json:"scenarios"`
-	Verdict        string         `json:"verdict"`
-	TestedHeadSHA  string         `json:"tested_head_sha"`
-	EvidenceSource string         `json:"evidence_source"`
-	EvidenceReason string         `json:"evidence_reason"`
-	RiskLevel      string         `json:"risk_level"`
-	RiskRationale  string         `json:"risk_rationale"`
-	RiskScope      string         `json:"risk_scope"`
-	// A new field must be added here and copied in ParseFindingsJSON below,
-	// or it is silently dropped on every parse.
-	DocReport    []HandoffNote    `json:"doc_report"`
-	LintReport   []HandoffNote    `json:"lint_report"`
-	AppliedNotes []HandoffOutcome `json:"applied_notes"`
-	Items   []Finding `json:"findings"`
-	Summary string    `json:"summary"`
-	// ReviewedPaths is the review step's coverage record: the changed files the
-	// review turn actually examined and judged. It is the positive-verification
-	// signal that lets a finding the operator selected for a fix leave the
-	// outstanding set (see pipeline.resolveVerifiedFindingsJSON). A review turn
-	// that does not list a path has not proven anything about it, so silence is
-	// never read as resolution. Empty on every non-review payload.
-	ReviewedPaths []string `json:"reviewed_paths,omitempty"`
-	// WithdrawnFindings is an answer round's explicit re-adjudication: the
-	// carried findings the reviewer now says no longer hold, each with its
-	// reason. On an answer round a carried finding leaves the outstanding set
-	// ONLY by appearing here. Silence keeps it, so covering a file can no
-	// longer clear an unrelated finding in it. Empty on every other payload.
-	WithdrawnFindings []WithdrawnFinding `json:"withdrawn_findings,omitempty"`
-	Tested            []string           `json:"tested,omitempty"`
-	TestingSummary    string             `json:"testing_summary,omitempty"`
-	Artifacts         []TestArtifact     `json:"artifacts,omitempty"`
-	Scenarios         []TestScenario     `json:"scenarios,omitempty"`
-	Verdict           string             `json:"verdict,omitempty"`
-	TestedHeadSHA     string             `json:"tested_head_sha,omitempty"`
-	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
-	// unvalidated-work check measured from, carried so a repeated cut before any
-	// evidence turn completes re-measures from that same head.
-	UnvalidatedSinceSHA string `json:"unvalidated_since_sha,omitempty"`
-	RiskLevel           string `json:"risk_level"`
-	RiskRationale       string `json:"risk_rationale"`
-	RiskScope           string `json:"risk_scope,omitempty"`
-}
-
-type findingsWire struct {
 	Items               []Finding          `json:"findings"`
 	Legacy              []Finding          `json:"items"`
 	Summary             string             `json:"summary"`
@@ -431,9 +398,16 @@ type findingsWire struct {
 	Verdict             string             `json:"verdict"`
 	TestedHeadSHA       string             `json:"tested_head_sha"`
 	UnvalidatedSinceSHA string             `json:"unvalidated_since_sha"`
+	EvidenceSource      string             `json:"evidence_source"`
+	EvidenceReason      string             `json:"evidence_reason"`
 	RiskLevel           string             `json:"risk_level"`
 	RiskRationale       string             `json:"risk_rationale"`
 	RiskScope           string             `json:"risk_scope"`
+	// A new field must be added here and copied in ParseFindingsJSON below,
+	// or it is silently dropped on every parse.
+	DocReport    []HandoffNote    `json:"doc_report"`
+	LintReport   []HandoffNote    `json:"lint_report"`
+	AppliedNotes []HandoffOutcome `json:"applied_notes"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -448,22 +422,6 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		items = wire.Legacy
 	}
 	return Findings{
-		Items:          items,
-		Summary:        wire.Summary,
-		Tested:         wire.Tested,
-		TestingSummary: wire.TestingSummary,
-		Artifacts:      wire.Artifacts,
-		Scenarios:      wire.Scenarios,
-		Verdict:        wire.Verdict,
-		TestedHeadSHA:  wire.TestedHeadSHA,
-		EvidenceSource: wire.EvidenceSource,
-		EvidenceReason: wire.EvidenceReason,
-		RiskLevel:      wire.RiskLevel,
-		RiskRationale:  wire.RiskRationale,
-		RiskScope:      wire.RiskScope,
-		DocReport:      wire.DocReport,
-		LintReport:     wire.LintReport,
-		AppliedNotes:   wire.AppliedNotes,
 		Items:               items,
 		Summary:             wire.Summary,
 		ReviewedPaths:       wire.ReviewedPaths,
@@ -475,9 +433,14 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		Verdict:             wire.Verdict,
 		TestedHeadSHA:       wire.TestedHeadSHA,
 		UnvalidatedSinceSHA: wire.UnvalidatedSinceSHA,
+		EvidenceSource:      wire.EvidenceSource,
+		EvidenceReason:      wire.EvidenceReason,
 		RiskLevel:           wire.RiskLevel,
 		RiskRationale:       wire.RiskRationale,
 		RiskScope:           wire.RiskScope,
+		DocReport:           wire.DocReport,
+		LintReport:          wire.LintReport,
+		AppliedNotes:        wire.AppliedNotes,
 	}, nil
 }
 

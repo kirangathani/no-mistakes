@@ -68,7 +68,6 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// head inside the same run, and therefore the same RunSessions). Dropping
 	// it here - before any turn of this round runs - also survives a daemon
 	// restart, because Forget deletes the persisted row too.
-	convDir := reviewConversationDir(sctx)
 	// askDir gates whether the reviewer may ASK (config only); readDir gates
 	// reading a conversation that already exists (config, or files on disk).
 	askDir := reviewConversationDir(sctx)
@@ -250,7 +249,6 @@ Previous review findings to address:
 	// net-deleted-author-lines git-diff backstop for the removal-of-required
 	// class - a fixer round that net-deletes author-added lines parks
 	// regardless of intent source. Held pending a scope decision.
-	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction + reviewQuestionProtocolSection(convDir, loadReviewConversation(sctx, convDir))
 	asked, err := loadReviewConversation(sctx, convDir)
 	if err != nil {
 		return nil, err
@@ -443,9 +441,6 @@ Risk assessment (after listing all findings):
 	// the step re-parked on the same question forever, because a fix round's
 	// rereview is deliberately session-free.
 	if sctx.FinalizingAnswers && convDir != "" {
-		conv := loadReviewConversation(sctx, convDir)
-		if answers := reviewAnswersPromptSection(conv); answers != "" {
-			turnPrompt = prompt + answers
 		// Reuses the load the prompt was built from rather than reading the two
 		// files again: no agent turn has run in between, so a second read can
 		// only return the same conversation, and loadReviewConversation logs
@@ -461,7 +456,6 @@ Risk assessment (after listing all findings):
 			if !resumingAnswers {
 				how = "replaying"
 			}
-			sctx.Log(fmt.Sprintf("%s the review with %d answered question(s)", how, len(conv.Answered())))
 			sctx.Log(fmt.Sprintf("%s the review with %d answered question(s)", how, len(asked.Answered())))
 		}
 	}
@@ -514,14 +508,6 @@ Risk assessment (after listing all findings):
 	// become ask-user findings, which is what parks the step in
 	// waiting-on-answers. The step never completes on its own with a question
 	// open; a human's approval still can, and the PR body says so.
-	conv := loadReviewConversation(sctx, convDir)
-	recordAnsweredQuestions(sctx, conv)
-	questionFindings := openReviewQuestionFindings(conv)
-	if len(questionFindings) > 0 {
-		sctx.Log(fmt.Sprintf("review is waiting on answers to %d question(s)", len(questionFindings)))
-		findings.Items = append(findings.Items, questionFindings...)
-	}
-
 	// Keyed on askDir, not the read dir: emitting a question finding is what
 	// PARKS the step, and a repository that has turned the conversation off
 	// must not have a fresh review inherit questions an earlier run asked.

@@ -9,8 +9,6 @@ every finding at the end, and any finding it could not decide became an
 answer then arrived as a gate response - approve, fix, or skip - which is a
 verdict on the whole round, not an answer to the question that was asked.
 
-The review conversation replaces the monologue with a two-way channel that runs
-*while* the review runs:
 The review conversation is **opt-in and off by default**. A repository asks for
 it with trusted
 [`review.conversation: true`](/no-mistakes/reference/repo-config/#reviewconversation)
@@ -69,12 +67,6 @@ story: a crash mid-write loses at most the trailing line, a reader can `tail -f`
 either file, and no writer ever needs a lock on something another process is
 reading. `internal/reviewqa` owns the shape and is the only parser.
 
-Because the files live in the run's evidence directory, an operator who has
-opted into [`test.evidence.store_in_repo`](/no-mistakes/reference/repo-config/)
-publishes them along with the run's other evidence. That is the same content the
-PR body already records, so it is deliberate rather than incidental - but note
-that the copy on the evidence branch is the raw text, while the PR body's copy
-goes through the home-path redaction every published body does.
 Only `id` and `question` are load-bearing on a question line. The reviewer is
 the sole writer of `questions.ndjson` - it appends with its own file tools, and
 there is no Go writer for that file - so every other field is optional on read:
@@ -105,15 +97,6 @@ and a per-adapter support matrix for a capability the agent already has.
 {"id":"q1","kind":"retract","reason":"answered by the migration note in docs/api.md","at":"2026-09-15T13:19:02Z"}
 ```
 
-- `id` is the reviewer's own stable handle for the question. A later line with
-  the same `id` supersedes the earlier one, so a re-ask is an edit, not a
-  duplicate.
-- `kind` is `question` or `retract`. A retracted question is closed: it never
-  blocks the step and never needs an answer.
-- `options` carries the multiple-choice alternatives. It is required for an
-  emitted question, because a question reaches the captain in the same
-  multiple-choice form he already receives - an open-ended question is a worse
-  question, not a shorter one.
 - `id` is the reviewer's own handle for the question. A later line with the same
   `id` supersedes the earlier one for that question's state, and revives it if it
   had been retracted - but it is a new **ask**, not an edit of the answered one.
@@ -146,14 +129,6 @@ and a per-adapter support matrix for a capability the agent already has.
 ### answers.ndjson
 
 ```json
-{"id":"q1","answer":"Keep behind a flag","answered_by":"captain","answered_at":"2026-09-15T13:31:40Z"}
-```
-
-Written by `no-mistakes axi answer`, or by any operator process appending the
-same line. The last line for an `id` wins, so a correction is another append.
-
-An answer for an unknown or retracted `id` is recorded and ignored, never an
-error: the writer may be racing a retraction it has not read yet.
 {"id":"q1","answer":"Keep behind a flag","answered_by":"captain","answered_at":"2026-09-15T13:31:40Z","ask_ordinal":1}
 ```
 
@@ -465,9 +440,6 @@ review inherit questions an earlier run asked.
 A mid-turn answer is not a gate response, so it cannot ride the existing
 `step_rounds` decision channel. The review step mirrors each answered question
 into `review_questions` when it finalizes: repository, branch, run, question id,
-question text, options, answer, who answered, and timestamps. Nothing deletes
-those rows, for the same reason nothing deletes a branch decision - an answer a
-human gave about this branch keeps standing.
 ask ordinal, question text, options, answer, who answered, and timestamps.
 Nothing deletes those rows, for the same reason nothing deletes a branch
 decision - an answer a human gave about this branch keeps standing.
@@ -512,11 +484,6 @@ and a new run starts. The superseded run's per-round fix summaries would be lost
 `uncertifiedRoundHistoryPromptSection` covers only *pipeline-authored* commits a
 previous run left uncertified.
 
-The initial review of a run therefore also receives the most recent superseded
-run's review rounds on the same branch, as a **Previous run's review rounds**
-section. It is labelled as author-fixed and deliberately carries no fix-round
-provenance clause: the code under review is the author's, reviewed under the
-ordinary standard, not pipeline-authored code needing the adversarial framing.
 The initial review of a run therefore also receives the most recent *other*
 run's review rounds on the same branch - the selector is deliberately
 unfiltered by that run's status, so it renders for an ordinary second push onto

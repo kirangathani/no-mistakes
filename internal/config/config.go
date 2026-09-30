@@ -198,8 +198,6 @@ type GlobalConfig struct {
 	// Rebase is the operator's own rebase-step default. A trusted repo
 	// value still wins over it.
 	Rebase RebaseRaw
-	Commit CommitRaw
-	Intent IntentRaw
 	Commit GlobalCommitRaw
 	Intent GlobalIntentRaw
 	Test   TestRaw
@@ -237,8 +235,6 @@ type globalConfigRaw struct {
 	AutoFix                 AutoFixRaw                 `yaml:"auto_fix"`
 	CI                      CIRaw                      `yaml:"ci"`
 	Rebase                  RebaseRaw                  `yaml:"rebase"`
-	Commit                  CommitRaw                  `yaml:"commit"`
-	Intent                  IntentRaw                  `yaml:"intent"`
 	Commit                  GlobalCommitRaw            `yaml:"commit"`
 	Intent                  GlobalIntentRaw            `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
@@ -645,10 +641,6 @@ type CI struct {
 
 // RebaseRaw is the YAML representation of rebase-step settings.
 type RebaseRaw struct {
-	// Strategy is a pointer so an explicit "rebase" in a repository's config
-	// can override a global "merge", which a plain string could not express
-	// (it would be indistinguishable from "not set").
-	Strategy *string `yaml:"strategy"`
 	Strategy string `yaml:"strategy"`
 }
 
@@ -3092,16 +3084,11 @@ func rebaseDefaults() Rebase {
 	return Rebase{Strategy: DefaultRebaseStrategy}
 }
 
-// applyRebaseOverrides applies a non-nil raw strategy onto resolved defaults.
 // applyRebaseOverrides applies a raw strategy onto resolved defaults.
 // The value was already validated at parse time, so an unrecognized one cannot
 // reach here; an empty string is treated as "not set" so a repository can
 // comment the key out without inventing a third meaning.
 func applyRebaseOverrides(dst *Rebase, src *RebaseRaw) {
-	if src.Strategy == nil {
-		return
-	}
-	if v := strings.TrimSpace(*src.Strategy); v != "" {
 	if v := strings.TrimSpace(src.Strategy); v != "" {
 		dst.Strategy = v
 	}
@@ -3111,14 +3098,6 @@ func applyRebaseOverrides(dst *Rebase, src *RebaseRaw) {
 // Silently falling back to the default would let a typo ("merges") quietly keep
 // rewriting history a maintainer asked to stop rewriting.
 func validateRebaseRaw(r RebaseRaw) error {
-	if r.Strategy == nil {
-		return nil
-	}
-	switch strings.TrimSpace(*r.Strategy) {
-	case "", RebaseStrategyRebase, RebaseStrategyMerge:
-		return nil
-	}
-	return fmt.Errorf("rebase.strategy: %q is not a valid strategy (want %q or %q)", *r.Strategy, RebaseStrategyRebase, RebaseStrategyMerge)
 	switch strings.TrimSpace(r.Strategy) {
 	case "", RebaseStrategyRebase, RebaseStrategyMerge:
 		return nil
