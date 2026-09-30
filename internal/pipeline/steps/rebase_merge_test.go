@@ -352,9 +352,6 @@ func runFixtureGit(dir string, args ...string) error {
 		"GIT_EDITOR=true",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatal(fmt.Errorf("git %v: %s: %w", args, out, err))
-	}
-}
 		return fmt.Errorf("git %v: %s: %w", args, out, err)
 	}
 	return nil

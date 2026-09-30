@@ -1,8 +1,6 @@
 package steps
 
 import (
-	"fmt"
-	"log/slog"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -22,12 +20,6 @@ import (
 // recent answers.
 const maxSettledQuestionsInPrompt = db.MaxBranchReviewAnswers
 
-// reviewConversationDir is where this run's review conversation lives. Empty
-// when the run has no evidence directory, which disables the protocol
-// entirely: the reviewer is told nothing about it and behaves exactly as it
-// did before, one JSON at the end of the turn.
-func reviewConversationDir(sctx *pipeline.StepContext) string {
-	if sctx == nil {
 // reviewConversationEnabled reports whether this repository asked for the
 // review conversation. It is the one owner of that question inside this
 // package: off, every part of the protocol is off together, which is what
@@ -57,20 +49,6 @@ func reviewConversationDir(sctx *pipeline.StepContext) string {
 	return reviewqa.Dir(sctx.EvidenceDir)
 }
 
-// loadReviewConversation reads the run's conversation, logging any bounded
-// protocol note the reader produced. A read failure is not fatal: the review
-// turn's findings still stand, and a conversation nobody can read is treated
-// as no conversation rather than a failed review.
-func loadReviewConversation(sctx *pipeline.StepContext, dir string) reviewqa.Conversation {
-	if dir == "" {
-		return reviewqa.Conversation{}
-	}
-	conv, err := reviewqa.Load(dir)
-	if err != nil {
-		if sctx != nil && sctx.Log != nil {
-			sctx.Log(fmt.Sprintf("could not read the review conversation (%v); continuing without it", err))
-		}
-		return reviewqa.Conversation{}
 // reviewConversationReadDir is where an EXISTING conversation may be read from,
 // or empty when none may be.
 //
@@ -131,7 +109,6 @@ func loadReviewConversation(sctx *pipeline.StepContext, dir string) (reviewqa.Co
 			sctx.Log("review conversation: " + note)
 		}
 	}
-	return conv
 	return conv, nil
 }
 
@@ -173,8 +150,6 @@ func reviewQuestionProtocolSection(dir string, conv reviewqa.Conversation) strin
 	b.WriteString("- Return your findings when you have reviewed everything you can. A question still open at that point does NOT stop you finishing: the run parks for the answer and you are resumed with it. Any finding whose correctness depends on an open question must say so in its description, starting with \"PENDING ANSWER (<question id>): \".\n")
 	if open := conv.Open(); len(open) > 0 {
 		b.WriteString("\nQuestions you already asked in this pass that are still unanswered (do not re-ask them under a new id):\n")
-		for _, e := range open {
-			fmt.Fprintf(&b, "  - %s: %s\n", sanitizePromptText(e.ID), sanitizePromptText(e.Question.Question))
 		for i, e := range open {
 			if i == maxReviewQuestionPromptEntries {
 				fmt.Fprintf(&b, "  - (%d more still unanswered; do not re-ask any of them)\n", len(open)-i)
@@ -204,13 +179,6 @@ func reviewAnswersPromptSection(conv reviewqa.Conversation) string {
 	b.WriteString("If you are the same session that asked these, continue the pass you paused; do not restart it. ")
 	b.WriteString("Each answer settles ONLY the question it answers: apply it to that question and to nothing else, and do not soften a finding you did not ask about. ")
 	b.WriteString("Then return your complete findings for this pass.\n\n")
-	for _, e := range answered {
-		fmt.Fprintf(&b, "  - %s\n", marshalSanitizedQuestionLine(e))
-	}
-	if withdrawn := conv.Withdrawn(); len(withdrawn) > 0 {
-		b.WriteString("\nQuestions you withdrew in this pass (no answer was needed):\n")
-		for _, e := range withdrawn {
-			fmt.Fprintf(&b, "  - %s: %s\n", sanitizePromptText(e.ID), sanitizePromptText(e.Question.Question))
 	for i, e := range answered {
 		if i == maxReviewQuestionPromptEntries {
 			fmt.Fprintf(&b, "  - (%d more answers not listed; re-read %s for them)\n", len(answered)-i, reviewqa.AnswersFile)
@@ -338,7 +306,6 @@ func loadBranchReviewAnswers(sctx *pipeline.StepContext) ([]db.ReviewAnswer, boo
 	}
 	answers, truncated, err := sctx.DB.GetBranchReviewAnswers(sctx.Repo.ID, branch, maxSettledQuestionsInPrompt)
 	if err != nil {
-		slog.Warn("failed to read settled review questions; continuing without them", "repo_id", sctx.Repo.ID, "error", err)
 		// An empty branch is no error at all, so reaching here means the read
 		// itself failed and every settled decision on this branch is missing
 		// from the do-not-re-raise section - the one thing that section exists
@@ -355,7 +322,6 @@ func loadBranchReviewAnswers(sctx *pipeline.StepContext) ([]db.ReviewAnswer, boo
 // the step_rounds decision channel that carries approve/fix/skip.
 //
 // Best effort: a write failure degrades the next reviewer's context, and
-// failing the review over it would throw away a completed pass.
 // failing the review over it would throw away a completed pass. It is reported
 // at ERROR rather than as a degradation, because the decision it drops is a
 // human's and nothing else records it.
@@ -380,22 +346,6 @@ func recordAnsweredQuestions(sctx *pipeline.StepContext, conv reviewqa.Conversat
 	if sctx.Repo.ID == "" || branch == "" {
 		return
 	}
-	for _, e := range conv.Answered() {
-		err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
-			RepoID:     sctx.Repo.ID,
-			Branch:     branch,
-			QuestionID: e.ID,
-			RunID:      sctx.Run.ID,
-			Question:   e.Question.Question,
-			Options:    e.Options,
-			File:       e.File,
-			Line:       e.Line,
-			Answer:     e.Answer.Answer,
-			AnsweredBy: e.Answer.AnsweredBy,
-			AnsweredAt: e.Answer.AnsweredAt,
-		})
-		if err != nil {
-			slog.Warn("failed to record a settled review question", "run_id", sctx.Run.ID, "question", e.ID, "error", err)
 	// One row per settled ASK, not per id: an agent reuses an id, so a later
 	// ask of "q1" is a different question a human answered separately, and
 	// writing only the latest state would erase the earlier decision from the
@@ -466,17 +416,6 @@ func reviewQuestionFindingID(questionID string) string {
 	return "question-" + questionID
 }
 
-// ReviewQuestionID recovers the question id from a review-question finding's
-// ID, reporting false for any other finding. Consumers outside the pipeline
-// (axi rendering, the PR body) use it rather than re-deriving the prefix.
-func ReviewQuestionID(findingID string) (string, bool) {
-	id, ok := strings.CutPrefix(strings.TrimSpace(findingID), "question-")
-	if !ok || id == "" {
-		return "", false
-	}
-	return id, true
-}
-
 // openReviewQuestionFindings turns each unanswered question into one ask-user
 // warning.
 //
@@ -493,10 +432,6 @@ func ReviewQuestionID(findingID string) (string, bool) {
 // filter - there is nothing here for a fixer to do.
 func openReviewQuestionFindings(conv reviewqa.Conversation) []types.Finding {
 	open := conv.Open()
-	if len(open) == 0 {
-		return nil
-	}
-	findings := make([]types.Finding, 0, len(open))
 	// An unreadable question history replaces the whole question channel for
 	// this gate, whatever remains open, because every "question-<id>" row ends
 	// in "Answer it with: no-mistakes axi answer --question <id>" and
@@ -566,7 +501,6 @@ func openReviewQuestionFindings(conv reviewqa.Conversation) []types.Finding {
 			Severity:    types.FindingSeverityWarning,
 			File:        e.File,
 			Line:        e.Line,
-			Description: b.String(),
 			Description: boundReviewQuestionText(b.String(), maxReviewQuestionDescription),
 			Action:      types.ActionAskUser,
 			Category:    types.FindingCategoryReviewQuestion,

@@ -27,7 +27,6 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 	}
 
 	if err := d.RecordReviewAnswer(ReviewAnswer{
-		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: first.ID,
 		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: first.ID, AskOrdinal: 1,
 		Question: "keep /v1?", Options: []string{"keep", "drop"},
 		File: "internal/api/router.go", Line: 88,
@@ -57,11 +56,6 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 		t.Fatalf("round-trip lost fields: %#v", got)
 	}
 
-	// A correction replaces rather than accumulating, matching the file
-	// protocol where the last answers.ndjson line for an id wins.
-	if err := d.RecordReviewAnswer(ReviewAnswer{
-		RepoID: repo.ID, Branch: "feature", QuestionID: "q1", RunID: second.ID,
-		Question: "keep /v1?", Answer: "drop it", AnsweredBy: "firstmate",
 	// A correction WITHIN THE SAME RUN replaces rather than accumulating,
 	// matching the file protocol where the last answers.ndjson line for an id
 	// wins.
@@ -75,8 +69,6 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(answers) != 1 || answers[0].Answer != "drop it" || answers[0].RunID != second.ID {
-		t.Fatalf("correction = %#v", answers)
 	if len(answers) != 1 || answers[0].Answer != "keep it unconditionally" {
 		t.Fatalf("same-run correction did not replace: %#v", answers)
 	}
@@ -112,7 +104,6 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 
 	// Another branch's conversation is not visible.
 	if err := d.RecordReviewAnswer(ReviewAnswer{
-		RepoID: repo.ID, Branch: "other", QuestionID: "q1", RunID: second.ID,
 		RepoID: repo.ID, Branch: "other", QuestionID: "q1", RunID: second.ID, AskOrdinal: 1,
 		Question: "unrelated", Answer: "yes",
 	}); err != nil {
@@ -122,7 +113,6 @@ func TestReviewAnswersAreKeyedByBranchAndSurviveANewRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(answers) != 1 {
 	if len(answers) != 2 {
 		t.Fatalf("branch scoping broken: %#v", answers)
 	}
@@ -140,7 +130,6 @@ func TestGetBranchReviewAnswersBoundsAndReportsTruncation(t *testing.T) {
 	}
 	for _, id := range []string{"q1", "q2", "q3"} {
 		if err := d.RecordReviewAnswer(ReviewAnswer{
-			RepoID: repo.ID, Branch: "feature", QuestionID: id, RunID: run.ID,
 			RepoID: repo.ID, Branch: "feature", QuestionID: id, RunID: run.ID, AskOrdinal: 1,
 			Question: "q " + id, Answer: "a " + id,
 		}); err != nil {
@@ -156,8 +145,6 @@ func TestGetBranchReviewAnswersBoundsAndReportsTruncation(t *testing.T) {
 	}
 }
 
-func TestGetRunReviewAnswersIsScopedToOneRun(t *testing.T) {
-	d := openTestDB(t)
 func TestRecordReviewAnswerRequiresItsKey(t *testing.T) {
 	d := openTestDB(t)
 	if err := d.RecordReviewAnswer(ReviewAnswer{Branch: "feature", QuestionID: "q1", AskOrdinal: 1, Answer: "a"}); err == nil {
@@ -179,41 +166,6 @@ func TestRecordReviewAnswerRequiresItsKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := d.InsertRun(repo.ID, "feature", "head-1", "base")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := d.InsertRun(repo.ID, "feature", "head-2", "base")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, spec := range []struct{ id, runID string }{{"q1", a.ID}, {"q2", b.ID}} {
-		if err := d.RecordReviewAnswer(ReviewAnswer{
-			RepoID: repo.ID, Branch: "feature", QuestionID: spec.id, RunID: spec.runID,
-			Question: "q", Answer: "a",
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got, err := d.GetRunReviewAnswers(b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].QuestionID != "q2" {
-		t.Fatalf("run answers = %#v", got)
-	}
-}
-
-func TestRecordReviewAnswerRequiresItsKey(t *testing.T) {
-	d := openTestDB(t)
-	if err := d.RecordReviewAnswer(ReviewAnswer{Branch: "feature", QuestionID: "q1", Answer: "a"}); err == nil {
-		t.Fatal("want error with no repo id")
-	}
-	if err := d.RecordReviewAnswer(ReviewAnswer{RepoID: "r", QuestionID: "q1", Answer: "a"}); err == nil {
-		t.Fatal("want error with no branch")
-	}
-	if err := d.RecordReviewAnswer(ReviewAnswer{RepoID: "r", Branch: "feature", Answer: "a"}); err == nil {
-		t.Fatal("want error with no question id")
 	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
 	if err != nil {
 		t.Fatal(err)

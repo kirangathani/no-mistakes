@@ -108,7 +108,6 @@ func publishedRunAnswers(sctx *pipeline.StepContext) []db.ReviewAnswer {
 	}
 	answers, _, err := sctx.DB.GetBranchReviewAnswers(sctx.Repo.ID, branch, db.MaxBranchReviewAnswers)
 	if err != nil {
-		slog.Warn("failed to read the review conversation for the PR body", "run_id", sctx.Run.ID, "error", err)
 		// A branch with nothing settled returns no rows and no error, so a
 		// failure here silently drops the answered half of the published
 		// conversation. Logged at ERROR rather than as a degradation.
@@ -143,12 +142,6 @@ func publishedRunConversation(sctx *pipeline.StepContext) reviewqa.Conversation 
 // publishedConversationText flattens and bounds one quoted line so a long
 // question or answer cannot dominate the body, and so a newline cannot break
 // out of the list item it belongs to.
-func publishedConversationText(s string) string {
-	s = sanitizePromptText(s)
-	if len(s) <= maxPublishedConversationChars {
-		return s
-	}
-	return s[:maxPublishedConversationChars] + fmt.Sprintf("… (truncated, %d chars total)", len(s))
 // It counts RUNES, not bytes, and so does its disclosure: a question or answer
 // is ordinary prose, so a byte cut falls inside a multi-byte rune on nothing
 // more exotic than a typographic quote or an em dash and publishes invalid

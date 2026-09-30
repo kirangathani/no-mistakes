@@ -338,17 +338,6 @@ func (e *Executor) initializeRunScopes(runID string) {
 
 type stepExecutionState struct {
 	fixing bool
-	// answering re-enters a review step whose gate parked on its reviewer's own
-	// open questions, now that every one of them has an answer. It is not a fix
-	// round and must never be set together with fixing: no code changed, and
-	// the same reviewer session is resumed to finish its pass.
-	answering        bool
-	previousFindings string
-	deferredFindings string
-	roundNum         int
-	autoFixAttempts  int
-	executionMS      int64
-	currentRoundID   string
 	// skipFixExecution replays an already-completed fix round's review turn
 	// only, mirroring what the live loop sets alongside an answer. It exists so
 	// a recovered answer round can inherit its gate's fix-round context without
@@ -625,12 +614,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
 			selected := filterFindingsJSON(gate.findings, response.findingIDs)
 			merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
-			if gate.lastRoundID != "" {
-				allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, merged)
-				if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
-					var userFindingsJSON *string
-					if merged != "" && merged != selected {
-						userFindingsJSON = &merged
 			selectedForPersistence := merged
 			outstandingFindings := gate.findings
 			selectedOutstandingIDs := gate.selectedOutstandingIDs
@@ -1064,7 +1047,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Shared:            e.shared,
 		EvidenceDir:       e.runEvidenceDir(run.ID),
 		Fixing:            state.fixing,
-		FinalizingAnswers: state.answering,
 		SkipFixExecution:  state.skipFixExecution,
 		FinalizingAnswers: state.answering,
 		CarriedFindings:   answerRoundCarriedFindings(state.answering, outstandingFindings),
@@ -1363,25 +1345,6 @@ rounds:
 				"action":     string(response.action),
 				"fix_review": sctx.Fixing,
 			}
-			sctx.Fixing = true
-			// A genuine fix round always executes its fixer, even when the
-			// round before it was an answer replay that suppressed one.
-			sctx.FinalizingAnswers = false
-			sctx.SkipFixExecution = false
-			selectedFindings := filterFindingsJSON(outcome.Findings, response.findingIDs)
-			mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
-			sctx.PreviousFindings = mergedFindings
-			sctx.DeferredFindings = removeMatchingFindingsJSON(outcome.Findings, selectedFindings)
-			nextTrigger = "auto_fix"
-			if currentRoundID != "" {
-				allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, mergedFindings)
-				if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
-					var userFindingsJSON *string
-					if mergedFindings != "" && mergedFindings != selectedFindings {
-						userFindingsJSON = &mergedFindings
-					}
-					if dbErr := e.db.SetStepRoundUserDecision(currentRoundID, &idsJSON, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
-						slog.Warn("failed to record user decision", "step", stepName, "round", roundNum, "error", dbErr)
 			if agentName := e.telemetryAgentName(); agentName != "" {
 				approvalFields["agent"] = agentName
 			}
@@ -1517,38 +1480,6 @@ rounds:
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", err.Error(), &executionMS)
 				return false, "", fmt.Errorf("step %s: %w", stepName, err)
 			}
-			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
-			slog.Info("step fix requested, re-executing", "step", stepName)
-			continue // loop back to step.Execute
-
-		case types.ActionAnswer:
-			// Every question the reviewer left open has been answered. This is
-			// not a verdict on the round and not a fix: no code changed, and
-			// the round is deliberately left without a recorded selection, so
-			// it never reads as a human declining its findings. The step goes
-			// back to running and re-executes, which resumes the SAME reviewer
-			// session with the answers.
-			//
-			// Only the review step owns a question channel. Any other step
-			// receiving this action would re-execute with review semantics it
-			// does not implement, so it fails closed instead.
-			if stepName != types.StepReview {
-				return false, "", fmt.Errorf("step %s: %q is only a review response", stepName, types.ActionAnswer)
-			}
-			phaseStart = time.Now()
-			writeLog(fmt.Sprintf("answers received; resuming the review after round %d", roundNum))
-			if dbErr := markRunning(); dbErr != nil {
-				slog.Warn("failed to return step status to running", "step", stepName, "error", dbErr)
-			}
-			sctx.FinalizingAnswers = true
-			// A question can be asked by a rereview inside a fix round too.
-			// That round's fixes are already applied and committed, so the
-			// re-execution must replay its REVIEW turn only; running the fixer
-			// again would re-apply the same findings to already-fixed code.
-			sctx.SkipFixExecution = true
-			nextTrigger = "answer"
-			slog.Info("review answers received, re-executing", "step", stepName)
-			continue // loop back to step.Execute
 		}
 	}
 
@@ -2227,17 +2158,6 @@ func selectedFindingCount(raw string, ids []string) int {
 	return findingsCount(raw)
 }
 
-// ReviewConversationDir is where a run's review conversation files live.
-//
-// The executor is the single owner of that answer, for the same reason it owns
-// runEvidenceDir: the path depends on the run's EFFECTIVE config
-// (test.evidence.local_root), which only the executor holds. Callers outside
-// the pipeline - the daemon's answer handler - ask here rather than
-// re-deriving it from global config and drifting from where the reviewer was
-// actually told to write.
-func (e *Executor) ReviewConversationDir(runID string) string {
-	return reviewqa.Dir(e.runEvidenceDir(runID))
-}
 // ReviewConversationDir is where a run's review conversation files live, or
 // empty when this run has no conversation at all.
 //

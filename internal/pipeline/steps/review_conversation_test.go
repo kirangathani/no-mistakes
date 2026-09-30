@@ -2,9 +2,6 @@ package steps
 
 import (
 	"context"
-	"strings"
-	"testing"
-	"time"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -82,14 +79,6 @@ func TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers(t *testing.T) 
 	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		// Stand in for the reviewer's own file tools: emit the question the
 		// moment it is substantiated, then carry on and return findings.
-		if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-			ID:       "q1",
-			Question: "Should the legacy /v1 route keep answering?",
-			Options:  []string{"Keep answering", "Remove it"},
-			File:     "internal/api/router.go",
-			Line:     88,
-			Area:     "routing",
-		}); err != nil {
 		// The prompt's worked example verbatim. It carries no asked_at,
 		// because nothing in that prompt mentions one.
 		if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"Should the legacy /v1 route keep answering?","options":["Keep answering","Remove it"],"weight":"major","file":"internal/api/router.go","line":88,"area":"routing"}`); err != nil {
@@ -99,7 +88,6 @@ func TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers(t *testing.T) 
 			`{"findings":[{"id":"f-1","severity":"info","description":"PENDING ANSWER (q1): depends on the route decision","action":"no-op"}],"summary":"one open question","risk_level":"low","risk_rationale":"pending","risk_scope":"source-or-external"}`,
 		)}, nil
 	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
 	convDir = reviewConversationDir(sctx)
 
@@ -139,7 +127,6 @@ func TestReviewStep_QuestionEmittedMidTurnParksInWaitingOnAnswers(t *testing.T) 
 	if !strings.Contains(q.Description, "Keep answering | Remove it") {
 		t.Fatalf("question finding lost its options: %q", q.Description)
 	}
-	if id, ok := ReviewQuestionID(q.ID); !ok || id != "q1" {
 	if q.ID != "question-q1" {
 		t.Fatalf("finding id %q does not carry the question id", q.ID)
 	}
@@ -158,14 +145,6 @@ func TestReviewStep_RetractedQuestionDoesNotPark(t *testing.T) {
 	var convDir string
 	ag := &mockAgent{}
 	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-			ID: "q1", Question: "does the migration cover this?", Options: []string{"yes", "no"},
-		}); err != nil {
-			return nil, err
-		}
-		if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-			ID: "q1", Kind: reviewqa.KindRetract, Reason: "the migration note answers it",
-		}); err != nil {
 		if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"does the migration cover this?","options":["yes","no"],"weight":"major"}`); err != nil {
 			return nil, err
 		}
@@ -176,7 +155,6 @@ func TestReviewStep_RetractedQuestionDoesNotPark(t *testing.T) {
 		}
 		return &agent.Result{Output: []byte(cleanReviewJSON)}, nil
 	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
 	convDir = reviewConversationDir(sctx)
 
@@ -207,9 +185,6 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 		}
 		turn++
 		if turn == 1 {
-			if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-				ID: "q1", Question: "keep the legacy route?", Options: []string{"keep", "remove"},
-			}); err != nil {
 			// A model that trimmed the example to the fields it was told are
 			// required: no kind, no weight, no asked_at.
 			if err := appendAgentQuestionLine(convDir, `{"id":"q1","question":"keep the legacy route?","options":["keep","remove"]}`); err != nil {
@@ -220,7 +195,6 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 		return &agent.Result{Output: []byte(cleanReviewJSON)}
 	}
 
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
 	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}}, enableReviewConversation)
 	convDir = exec.ReviewConversationDir(run.ID)
 
@@ -228,7 +202,6 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 
 	waitForReviewStatus(t, database, run.ID, types.StepStatusAwaitingApproval)
-	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain"}); err != nil {
 	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append answer: %v", err)
 	}
@@ -321,16 +294,12 @@ func TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout(t *testin
 		}
 		turn++
 		if turn == 1 {
-			if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-				ID: "q1", Question: "keep it?", Options: []string{"keep", "drop"},
-			}); err != nil {
 			if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"keep it?","options":["keep","drop"],"weight":"major"}`); err != nil {
 				return nil, err
 			}
 		}
 		return &agent.Result{Output: []byte(cleanReviewJSON)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
 	sctx.Config.ReviewAgentTimeout = 30 * time.Minute
 	convDir = reviewConversationDir(sctx)
@@ -346,7 +315,6 @@ func TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout(t *testin
 
 	// A 90-minute park - three times the whole review budget.
 	clock = clock.Add(90 * time.Minute)
-	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep"}); err != nil {
 	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append answer: %v", err)
 	}
@@ -379,7 +347,6 @@ func TestReviewStep_ParkedWaitDoesNotCountAgainstTheReviewAgentTimeout(t *testin
 func TestReviewStep_SettledQuestionReachesTheNextColdReviewer(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := newStaticReviewAgent(cleanReviewJSON)
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx := withReviewConversation(newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{}))
 
 	earlier, err := sctx.DB.InsertRun(sctx.Repo.ID, sctx.Run.Branch, "older-head", baseSHA)
@@ -387,7 +354,6 @@ func TestReviewStep_SettledQuestionReachesTheNextColdReviewer(t *testing.T) {
 		t.Fatalf("insert earlier run: %v", err)
 	}
 	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
-		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: earlier.ID,
 		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: earlier.ID, AskOrdinal: 1,
 		Question: "Should seed bytes be computed in the browser?",
 		Answer:   "Yes, keep it in the browser", AnsweredBy: "captain",
@@ -416,7 +382,6 @@ func TestReviewStep_SettledQuestionReachesTheNextColdReviewer(t *testing.T) {
 // supersedes the parked run, so the new run's review step starts with no round
 // history at all - the previous run's findings and fix summaries have to travel
 // explicitly or the cold reviewer cannot tell a conversation ever happened.
-func TestReviewStep_SupersedeCarriesThePreviousRunsReviewRounds(t *testing.T) {
 //
 // The channel exists for the conversation, so it is off with it: the off case
 // is asserted here rather than left implied, because this section reaches the
@@ -437,7 +402,6 @@ func assertSupersedeSection(t *testing.T, conversation bool) {
 	mock.respond = func(agent.RunOpts) *agent.Result {
 		return &agent.Result{Output: []byte(cleanReviewJSON)}
 	}
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
 	var tweaks []func(*config.Config)
 	if conversation {
 		tweaks = append(tweaks, enableReviewConversation)
@@ -468,7 +432,6 @@ func assertSupersedeSection(t *testing.T, conversation bool) {
 		t.Fatalf("expected one review turn, got %d", len(reviews))
 	}
 	prompt := reviews[0].Prompt
-	if !strings.Contains(prompt, "Previous run's review rounds on this branch (superseded by a later push):") {
 	const heading = "Previous run's review rounds on this branch:"
 	if !conversation {
 		if strings.Contains(prompt, heading) || strings.Contains(prompt, "drops the straggler") {
@@ -493,7 +456,6 @@ func assertSupersedeSection(t *testing.T, conversation bool) {
 // was asked, what was answered, and by whom.
 func TestBuildReviewConversationSection(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	sctx := newTestContextWithDBRecords(t, newStaticReviewAgent(cleanReviewJSON), dir, baseSHA, headSHA, config.Commands{})
 	sctx := withReviewConversation(newTestContextWithDBRecords(t, newStaticReviewAgent(cleanReviewJSON), dir, baseSHA, headSHA, config.Commands{}))
 
 	if got := buildReviewConversationSection(sctx); got != "" {
@@ -501,25 +463,18 @@ func TestBuildReviewConversationSection(t *testing.T) {
 	}
 
 	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
-		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: sctx.Run.ID,
 		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: sctx.Run.ID, AskOrdinal: 1,
 		Question: "Should the legacy route keep answering?", Answer: "Keep it behind a flag", AnsweredBy: "captain",
 	}); err != nil {
 		t.Fatalf("record answer: %v", err)
 	}
 	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
-		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q2", RunID: sctx.Run.ID,
 		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q2", RunID: sctx.Run.ID, AskOrdinal: 1,
 		Question: "Is the widened scope intended?", Answer: "No, narrow it",
 	}); err != nil {
 		t.Fatalf("record answer: %v", err)
 	}
 	convDir := reviewConversationDir(sctx)
-	for _, q := range []reviewqa.Question{
-		{ID: "q3", Question: "does the migration cover this?", Options: []string{"yes", "no"}},
-		{ID: "q3", Kind: reviewqa.KindRetract, Reason: "the migration note answers it"},
-	} {
-		if err := reviewqa.AppendQuestion(convDir, q); err != nil {
 	for _, line := range []string{
 		`{"id":"q3","kind":"question","question":"does the migration cover this?","options":["yes","no"],"weight":"major"}`,
 		`{"id":"q3","kind":"retract","reason":"the migration note answers it"}`,
@@ -532,9 +487,6 @@ func TestBuildReviewConversationSection(t *testing.T) {
 	// A question a human approved the gate over: the review step never
 	// completes on its own with one open, but approval can, and that is the
 	// line a reader of the PR most needs.
-	if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-		ID: "q4", Question: "is widening this scope intended?", Options: []string{"yes", "no"},
-	}); err != nil {
 	if err := appendAgentQuestionLine(convDir, `{"id":"q4","question":"is widening this scope intended?","options":["yes","no"]}`); err != nil {
 		t.Fatalf("append question: %v", err)
 	}
@@ -654,13 +606,6 @@ func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T)
 			reviewTurn++
 			if reviewTurn == 1 {
 				return &agent.Result{Output: []byte(
-					`{"findings":[{"id":"f-1","severity":"error","description":"bug","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external"}`,
-				)}
-			}
-			if reviewTurn == 2 {
-				if err := reviewqa.AppendQuestion(convDir, reviewqa.Question{
-					ID: "q1", Question: "was the fix meant to change this behaviour?", Options: []string{"yes", "no"},
-				}); err != nil {
 					`{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","description":"bug","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external"}`,
 				)}
 			}
@@ -678,7 +623,6 @@ func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T)
 		}
 	}
 
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
 	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}}, enableReviewConversation)
 	convDir = exec.ReviewConversationDir(run.ID)
 
@@ -686,7 +630,6 @@ func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T)
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 
 	waitForReviewStatus(t, database, run.ID, types.StepStatusFixReview)
-	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "yes"}); err != nil {
 	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "yes", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append answer: %v", err)
 	}
@@ -747,7 +690,6 @@ func TestReviewStep_OnlyAFinalizeTurnResumesTheReviewerSession(t *testing.T) {
 			mock.respond = func(agent.RunOpts) *agent.Result {
 				return &agent.Result{Output: []byte(cleanReviewJSON)}
 			}
-			sctx := newTestContextWithDBRecords(t, mock, dir, baseSHA, headSHA, config.Commands{})
 			sctx := withReviewConversation(newTestContextWithDBRecords(t, mock, dir, baseSHA, headSHA, config.Commands{}))
 			if err := sctx.DB.UpsertRunAgentSession(sctx.Run.ID, string(pipeline.SessionRoleReviewer), mock.Name(), "stale-sess"); err != nil {
 				t.Fatalf("seed reviewer session: %v", err)

@@ -1,9 +1,6 @@
 package daemon
 
 import (
-	"path/filepath"
-	"strings"
-	"testing"
 	"context"
 	"fmt"
 	"os"
@@ -39,7 +36,6 @@ func answerFixtureWithConversation(t *testing.T, conversation bool) (*RunManager
 
 	m := NewRunManager(database, p, nil)
 	const runID = "run-answer-1"
-	exec := pipeline.NewExecutor(database, p, &config.Config{}, nil, nil, nil)
 	cfg := &config.Config{Review: config.Review{Conversation: conversation}}
 	exec := pipeline.NewExecutor(database, p, cfg, nil, nil, nil)
 	m.mu.Lock()
@@ -80,11 +76,6 @@ func TestAnswerReviewQuestionRecordsBeforeItDecidesToRelease(t *testing.T) {
 	m, p, runID := answerFixture(t)
 	dir := conversationDir(p, runID)
 	for _, id := range []string{"q1", "q2"} {
-		if err := reviewqa.AppendQuestion(dir, reviewqa.Question{
-			ID: id, Question: "question " + id, Options: []string{"a", "b"},
-		}); err != nil {
-			t.Fatalf("append question: %v", err)
-		}
 		// No asked_at: the reviewer's prompt never mentions one, so its own
 		// lines do not carry it.
 		appendAgentQuestionLine(t, dir, fmt.Sprintf(`{"id":%q,"kind":"question","question":"question %s","options":["a","b"],"weight":"major"}`, id, id))
@@ -146,11 +137,6 @@ func TestAnswerReviewQuestionRecordsBeforeItDecidesToRelease(t *testing.T) {
 func TestAnswerReviewQuestionCorrectionReplacesTheEarlierAnswer(t *testing.T) {
 	m, p, runID := answerFixture(t)
 	dir := conversationDir(p, runID)
-	if err := reviewqa.AppendQuestion(dir, reviewqa.Question{
-		ID: "q1", Question: "keep it?", Options: []string{"keep", "drop"},
-	}); err != nil {
-		t.Fatalf("append question: %v", err)
-	}
 	appendAgentQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep it?","options":["keep","drop"],"weight":"major"}`)
 	for _, answer := range []string{"keep", "drop, on reflection"} {
 		if _, err := m.HandleAnswerReviewQuestion(runID, "q1", answer, "captain"); err != nil {
@@ -207,11 +193,6 @@ func TestAnswerReviewQuestionForAnUnknownQuestionDoesNotOpenOne(t *testing.T) {
 	}
 }
 
-// The handler is review-scoped by construction: it is the only sender of
-// types.ActionAnswer, and the executor refuses that action for any other step.
-func TestAnswerActionIsReviewScoped(t *testing.T) {
-	if types.ActionAnswer == types.ActionApprove || types.ActionAnswer == types.ActionFix {
-		t.Fatal("the answer action must be distinct from a gate verdict")
 // TestAnswerReviewQuestionRefusesWhenTheConversationIsOff is the opt-in half of
 // the answer channel. A repository that has not set review.conversation has no
 // reviewer that was ever told to ask, so an answer has nothing to settle and

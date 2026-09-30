@@ -64,7 +64,6 @@ func TestOpenAnsweredAndWithdrawnPartitionTheConversation(t *testing.T) {
 		`{"id":"q3","kind":"retract","reason":"answered by the migration note"}`,
 	)
 	write(t, dir, AnswersFile,
-		`{"id":"q2","answer":"off","answered_by":"captain"}`,
 		`{"id":"q2","answer":"off","answered_by":"captain","ask_ordinal":1}`,
 	)
 
@@ -102,9 +101,6 @@ func TestLaterLinesSupersedeEarlierOnesForTheSameID(t *testing.T) {
 		`{"id":"q2","kind":"retract","reason":"thought it was settled"}`,
 		`{"id":"q2","question":"withdrawn then re-asked","options":["a"]}`,
 	)
-	write(t, dir, AnswersFile,
-		`{"id":"q1","answer":"a"}`,
-		`{"id":"q1","answer":"b, on reflection"}`,
 	// Both stamped for q1's SECOND ask: the daemon stamps with the id's ask
 	// count at the moment of the append, and the edit was already on disk.
 	write(t, dir, AnswersFile,
@@ -144,9 +140,6 @@ func TestMalformedMinorAndOrphanLinesAreNotedNotFatal(t *testing.T) {
 		`{"id":"q6","kind":"retract"}`,
 	)
 	write(t, dir, AnswersFile,
-		`{"id":"q1","answer":"a"}`,
-		`{"id":"nope","answer":"whatever"}`,
-		`{"id":"q1","answer":""}`,
 		`{"id":"q1","answer":"a","ask_ordinal":1}`,
 		`{"id":"nope","answer":"whatever"}`,
 		`{"id":"q1","answer":"","ask_ordinal":1}`,
@@ -176,12 +169,6 @@ func TestMalformedMinorAndOrphanLinesAreNotedNotFatal(t *testing.T) {
 	}
 }
 
-func TestAppendRoundTripsAndValidates(t *testing.T) {
-	dir := Dir(t.TempDir())
-	if err := AppendQuestion(dir, Question{ID: "q1", Question: "keep /v1?", Options: []string{"keep", "drop"}}); err != nil {
-		t.Fatalf("AppendQuestion: %v", err)
-	}
-	if err := AppendAnswer(dir, Answer{ID: "q1", Answer: "drop", AnsweredBy: "captain"}); err != nil {
 // TestAppendAnswerRoundTripsAndValidates covers the one writer this package
 // owns. There is deliberately no question-writing counterpart: the reviewer
 // appends questions itself (see the package comment), so the question side's
@@ -202,23 +189,6 @@ func TestAppendAnswerRoundTripsAndValidates(t *testing.T) {
 		t.Fatalf("conversation = %+v", conv)
 	}
 	entry := conv.Answered()[0]
-	if entry.Weight != WeightMajor || entry.AskedAt == "" || entry.Answer.AnsweredAt == "" {
-		t.Fatalf("defaults not applied: %+v", entry)
-	}
-
-	if err := AppendQuestion(dir, Question{Question: "no id"}); err == nil {
-		t.Fatal("want error for a question with no id")
-	}
-	if err := AppendQuestion(dir, Question{ID: "q2"}); err == nil {
-		t.Fatal("want error for a question with no text")
-	}
-	if err := AppendAnswer(dir, Answer{ID: "q2"}); err == nil {
-		t.Fatal("want error for an answer with no text")
-	}
-	if err := AppendAnswer("", Answer{ID: "q2", Answer: "x"}); err == nil {
-		t.Fatal("want error for an unset directory")
-	}
-	if err := AppendQuestion(dir, Question{ID: "big", Question: strings.Repeat("x", maxLineBytes)}); err == nil {
 	if entry.Answer.AnsweredAt == "" {
 		t.Fatalf("answered_at default not applied: %+v", entry.Answer)
 	}

@@ -35,11 +35,6 @@ type ReviewAnswer struct {
 
 // RecordReviewAnswer persists one answered review question for a branch.
 //
-// The write is an upsert keyed by (repo, branch, question): a corrected answer
-// replaces the earlier one rather than accumulating, which matches the file
-// protocol where the last answers.ndjson line for an id wins. run_id records
-// which run's reviewer asked it and is deliberately not part of the key - the
-// answer is about the branch, and a later run must not re-ask it.
 // The write is an upsert keyed by (repo, branch, question, run, ask): a
 // corrected answer to the SAME ask replaces the earlier one rather than
 // accumulating, which matches the file protocol where the last answers.ndjson
@@ -86,11 +81,6 @@ func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 	now := time.Now().Unix()
 	_, err := d.sql.Exec(
 		`INSERT INTO review_questions
-		    (repo_id, branch, question_id, run_id, question, options_json, file, line,
-		     answer, answered_by, answered_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (repo_id, branch, question_id) DO UPDATE SET
-		    run_id = excluded.run_id,
 		    (repo_id, branch, question_id, run_id, ask_ordinal, question, options_json, file, line,
 		     answer, answered_by, answered_at, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -103,7 +93,6 @@ func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 		    answered_by = excluded.answered_by,
 		    answered_at = excluded.answered_at,
 		    updated_at = excluded.updated_at`,
-		a.RepoID, a.Branch, a.QuestionID, a.RunID, a.Question, optionsJSON,
 		a.RepoID, a.Branch, a.QuestionID, a.RunID, a.AskOrdinal, a.Question, optionsJSON,
 		nullableText(a.File), nullableInt(a.Line),
 		a.Answer, nullableText(a.AnsweredBy), nullableText(a.AnsweredAt), now, now,
@@ -122,11 +111,6 @@ func (d *DB) GetBranchReviewAnswers(repoID, branch string, limit int) ([]ReviewA
 		limit = MaxBranchReviewAnswers
 	}
 	rows, err := d.sql.Query(
-		`SELECT repo_id, branch, question_id, run_id, question, options_json, file, line,
-		        answer, answered_by, answered_at, updated_at
-		   FROM review_questions
-		  WHERE repo_id = ? AND branch = ?
-		  ORDER BY updated_at DESC, question_id DESC
 		`SELECT repo_id, branch, question_id, run_id, ask_ordinal, question, options_json, file, line,
 		        answer, answered_by, answered_at, updated_at
 		   FROM review_questions
@@ -153,7 +137,6 @@ func (d *DB) GetBranchReviewAnswers(repoID, branch string, limit int) ([]ReviewA
 		var optionsJSON, file, answeredBy, answeredAt *string
 		var line *int64
 		if err := rows.Scan(
-			&a.RepoID, &a.Branch, &a.QuestionID, &a.RunID, &a.Question, &optionsJSON,
 			&a.RepoID, &a.Branch, &a.QuestionID, &a.RunID, &a.AskOrdinal, &a.Question, &optionsJSON,
 			&file, &line, &a.Answer, &answeredBy, &answeredAt, &a.UpdatedAt,
 		); err != nil {
@@ -184,54 +167,6 @@ func (d *DB) GetBranchReviewAnswers(repoID, branch string, limit int) ([]ReviewA
 		answers = answers[:limit]
 	}
 	return answers, truncated, nil
-}
-
-// GetRunReviewAnswers returns the answers recorded by one run's reviewer, in
-// the order they were answered. The PR body uses it to record the review
-// conversation of the run that is being published.
-func (d *DB) GetRunReviewAnswers(runID string) ([]ReviewAnswer, error) {
-	rows, err := d.sql.Query(
-		`SELECT repo_id, branch, question_id, run_id, question, options_json, file, line,
-		        answer, answered_by, answered_at, updated_at
-		   FROM review_questions
-		  WHERE run_id = ?
-		  ORDER BY updated_at ASC, question_id ASC`,
-		runID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get run review answers: %w", err)
-	}
-	defer rows.Close()
-
-	var answers []ReviewAnswer
-	for rows.Next() {
-		var a ReviewAnswer
-		var optionsJSON, file, answeredBy, answeredAt *string
-		var line *int64
-		if err := rows.Scan(
-			&a.RepoID, &a.Branch, &a.QuestionID, &a.RunID, &a.Question, &optionsJSON,
-			&file, &line, &a.Answer, &answeredBy, &answeredAt, &a.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan run review answer: %w", err)
-		}
-		if optionsJSON != nil {
-			_ = json.Unmarshal([]byte(*optionsJSON), &a.Options)
-		}
-		if file != nil {
-			a.File = *file
-		}
-		if line != nil {
-			a.Line = int(*line)
-		}
-		if answeredBy != nil {
-			a.AnsweredBy = *answeredBy
-		}
-		if answeredAt != nil {
-			a.AnsweredAt = *answeredAt
-		}
-		answers = append(answers, a)
-	}
-	return answers, rows.Err()
 }
 
 func nullableText(s string) any {

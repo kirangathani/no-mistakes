@@ -40,14 +40,6 @@ const (
 	KindRetract  = "retract"
 )
 
-// Weights a question can carry. Only major questions are ever emitted: the
-// reviewer decides minor ones itself (captain's ruling of 2026-09-15, routing
-// by weight unchanged), so a minor line is a protocol violation and is
-// reported rather than silently escalated.
-const (
-	WeightMajor = "major"
-	WeightMinor = "minor"
-)
 // WeightMinor is the only weight this package reads. Only major questions are
 // ever emitted: the reviewer decides minor ones itself (captain's ruling of
 // 2026-09-15, routing by weight unchanged), so a minor line is a protocol
@@ -66,9 +58,6 @@ const (
 // Bounds on what is read from either file. They exist because every loaded
 // entry is rendered into an agent prompt and into `axi` output, so an agent
 // that appends in a loop must degrade to a truncated conversation rather than
-// an unbounded one. maxLines counts accepted lines; a longer file keeps its
-// NEWEST lines, because a later line supersedes an earlier one with the same
-// id.
 // an unbounded one.
 //
 // The two bounds behave oppositely and both matter. maxLines counts accepted
@@ -82,14 +71,6 @@ const (
 	maxLineBytes = 64 << 10
 )
 
-// ErrTruncated reports that a file exceeded maxFileBytes and only its leading
-// bytes were parsed. The conversation is still returned: a partially readable
-// conversation is more useful than none, and the caller decides whether to say
-// so.
-var ErrTruncated = errors.New("review conversation file truncated")
-
-// Question is one line of questions.ndjson. A KindRetract line carries only
-// ID, Kind, Reason and At.
 // Question is one line of questions.ndjson. A KindRetract line carries only ID,
 // Kind and Reason.
 //
@@ -108,11 +89,6 @@ type Question struct {
 	Line     int      `json:"line,omitempty"`
 	Area     string   `json:"area,omitempty"`
 	Reason   string   `json:"reason,omitempty"`
-	AskedAt  string   `json:"asked_at,omitempty"`
-	At       string   `json:"at,omitempty"`
-}
-
-// Answer is one line of answers.ndjson.
 }
 
 // Answer is one line of answers.ndjson.
@@ -265,7 +241,6 @@ func Dir(evidenceDir string) string {
 	if strings.TrimSpace(evidenceDir) == "" {
 		return ""
 	}
-	return filepath.Join(evidenceDir, "review")
 	return filepath.Join(evidenceDir, DirName)
 }
 
@@ -278,11 +253,6 @@ func Load(dir string) (Conversation, error) {
 		return conv, nil
 	}
 
-	questionLines, qTruncated, err := readLines(filepath.Join(dir, QuestionsFile))
-	if err != nil {
-		return conv, err
-	}
-	answerLines, aTruncated, err := readLines(filepath.Join(dir, AnswersFile))
 	questionLines, droppedQuestionLine, questionsIncomplete, err := readLines(filepath.Join(dir, QuestionsFile))
 	// Both read bounds have to fail the same way, and they did not. The byte
 	// bound stops the scan, so the tail is unseen and nothing settles. The line
@@ -313,20 +283,6 @@ func Load(dir string) (Conversation, error) {
 
 	order := make([]string, 0, len(questionLines))
 	byID := make(map[string]*Entry, len(questionLines))
-	for _, line := range questionLines {
-		var q Question
-		if err := json.Unmarshal([]byte(line), &q); err != nil {
-			conv.Notes = append(conv.Notes, "skipped a malformed questions.ndjson line")
-			continue
-		}
-		q.ID = strings.TrimSpace(q.ID)
-		if q.ID == "" {
-			conv.Notes = append(conv.Notes, "skipped a questions.ndjson line with no id")
-			continue
-		}
-		switch strings.TrimSpace(q.Kind) {
-		case KindRetract:
-			if entry, ok := byID[q.ID]; ok {
 	// An id can be ASKED more than once: ids are chosen by the agent (the
 	// protocol's worked example is literally "q1"), the conversation directory
 	// is per RUN, and a cold rereview in a fix round is shown only the OPEN
@@ -366,28 +322,6 @@ func Load(dir string) (Conversation, error) {
 				conv.Notes = append(conv.Notes, fmt.Sprintf("retraction for unknown question %q ignored", q.ID))
 			}
 			continue
-		case KindQuestion, "":
-			q.Kind = KindQuestion
-		default:
-			conv.Notes = append(conv.Notes, fmt.Sprintf("skipped question %q with unknown kind %q", q.ID, q.Kind))
-			continue
-		}
-		if strings.TrimSpace(q.Question) == "" {
-			conv.Notes = append(conv.Notes, fmt.Sprintf("skipped question %q with no question text", q.ID))
-			continue
-		}
-		// Routing by weight is the reviewer's own job, so a minor question is
-		// never escalated on its behalf: emitting one is the protocol
-		// violation, and reporting it keeps that visible instead of parking
-		// the run on a question the reviewer was told to decide itself.
-		if strings.EqualFold(strings.TrimSpace(q.Weight), WeightMinor) {
-			conv.Notes = append(conv.Notes, fmt.Sprintf("dropped minor-weight question %q; the reviewer decides minor questions itself", q.ID))
-			continue
-		}
-		if entry, ok := byID[q.ID]; ok {
-			// A later question line for the same id is an edit, not a
-			// duplicate. It also revives a retracted question, because
-			// re-asking is how the reviewer says the retraction was wrong.
 		}
 		asks[q.ID]++
 		lines[q.ID] = append(lines[q.ID], q)
@@ -419,16 +353,12 @@ func Load(dir string) (Conversation, error) {
 			conv.Notes = append(conv.Notes, "skipped an answers.ndjson line with no id or no answer")
 			continue
 		}
-		entry, ok := byID[a.ID]
-		if !ok {
 		if _, ok := byID[a.ID]; !ok {
 			// The writer may be racing a question it has not read yet, or
 			// answering something the reviewer withdrew. Recorded, ignored.
 			conv.Notes = append(conv.Notes, fmt.Sprintf("answer for unknown question %q ignored", a.ID))
 			continue
 		}
-		answer := a
-		entry.Answer = &answer
 		answersByID[a.ID] = append(answersByID[a.ID], a)
 	}
 
@@ -459,36 +389,6 @@ func Load(dir string) (Conversation, error) {
 	for _, id := range order {
 		conv.Entries = append(conv.Entries, *byID[id])
 	}
-	if qTruncated || aTruncated {
-		conv.Notes = append(conv.Notes, "review conversation file exceeded its size bound; older lines were not read")
-	}
-	return conv, nil
-}
-
-// AppendQuestion appends one question or retraction, creating the directory on
-// first use. It is the writer the pipeline's own tests and any future tool use;
-// the reviewer agent writes the same lines with its own file tools.
-func AppendQuestion(dir string, q Question) error {
-	if strings.TrimSpace(q.ID) == "" {
-		return errors.New("review question requires an id")
-	}
-	if strings.TrimSpace(q.Kind) == "" {
-		q.Kind = KindQuestion
-	}
-	if q.Kind == KindQuestion {
-		if strings.TrimSpace(q.Question) == "" {
-			return errors.New("review question requires question text")
-		}
-		if strings.TrimSpace(q.Weight) == "" {
-			q.Weight = WeightMajor
-		}
-		if strings.TrimSpace(q.AskedAt) == "" {
-			q.AskedAt = time.Now().UTC().Format(time.RFC3339)
-		}
-	} else if strings.TrimSpace(q.At) == "" {
-		q.At = time.Now().UTC().Format(time.RFC3339)
-	}
-	return appendLine(dir, QuestionsFile, q)
 	if questionsIncomplete || answersIncomplete || droppedAnswerLine {
 		conv.Notes = append(conv.Notes, "review conversation file exceeded its size bound; older lines were not read")
 	}
@@ -599,13 +499,6 @@ func appendLine(dir, name string, payload any) error {
 
 // readLines returns the non-empty lines of an ndjson file, newest-last and
 // bounded. A missing file is no lines and no error.
-func readLines(path string) ([]string, bool, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("open %s: %w", filepath.Base(path), err)
 //
 // It reports its two bounds separately because the caller treats them
 // differently per file. dropped says the maxLines cap removed a leading prefix;
@@ -624,14 +517,12 @@ func readLines(path string) (kept []string, dropped, incomplete bool, err error)
 	defer f.Close()
 
 	var lines []string
-	truncated := false
 	read := 0
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64<<10), maxLineBytes)
 	for scanner.Scan() {
 		read += len(scanner.Bytes()) + 1
 		if read > maxFileBytes {
-			truncated = true
 			incomplete = true
 			break
 		}
@@ -644,13 +535,6 @@ func readLines(path string) (kept []string, dropped, incomplete bool, err error)
 	if err := scanner.Err(); err != nil {
 		// A line over the scanner budget, or a torn read while the reviewer is
 		// still appending. Keep what parsed rather than losing the file.
-		truncated = true
-	}
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
-		truncated = true
-	}
-	return lines, truncated, nil
 		incomplete = true
 	}
 	if len(lines) > maxLines {

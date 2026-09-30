@@ -11,23 +11,6 @@ import (
 
 // JSON-RPC 2.0 method names.
 const (
-	MethodPushReceived       = "push_received"
-	MethodStartFreshRun      = "start_fresh_run"
-	MethodClaimLaunchReceipt = "claim_launch_receipt"
-	MethodGetRun             = "get_run"
-	MethodGetStepDiff        = "get_step_diff"
-	MethodGetRuns            = "get_runs"
-	MethodGetRunsForHead     = "get_runs_for_head"
-	MethodGetActiveRun       = "get_active_run"
-	MethodRerun              = "rerun"
-	MethodSubscribe          = "subscribe"
-	MethodRespond            = "respond"
-	MethodAnswerReview       = "answer_review_question"
-	MethodCancelRun          = "cancel_run"
-	MethodGateContext        = "gate_context"
-	MethodAdmitPush          = "admit_push"
-	MethodHealth             = "health"
-	MethodShutdown           = "shutdown"
 	MethodPushReceived            = "push_received"
 	MethodResolvePiProfile        = "resolve_pi_profile"
 	MethodProbeOmitIntent         = "probe_omit_intent"
@@ -365,9 +348,6 @@ type AnswerReviewQuestionParams struct {
 // AnswerReviewQuestionResult reports what the recorded answer did. Open counts
 // the questions still unanswered after it, and Resumed is true when that count
 // reached zero and the reviewer's own session was resumed to finish its pass.
-// Resumed false with Open zero is the ordinary mid-turn case: the reviewer is
-// still working and reads the answer at its next checkpoint, so there is no
-// gate to release.
 // Resumed false with Open zero covers TWO cases, and Note distinguishes them:
 // the reviewer is still working and reads the answer at its next checkpoint, so
 // there is no gate to release; or this answer closed no question that was open

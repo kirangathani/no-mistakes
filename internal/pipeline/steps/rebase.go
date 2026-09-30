@@ -631,9 +631,6 @@ Instructions:
 		return fmt.Errorf("agent did not complete the merge")
 	}
 
-	return nil
-}
-
 	// A conflicted rebase is the other way the worktree can be left mid
 	// operation, and git sets no MERGE_HEAD for it: an agent that abandons the
 	// merge and rebases onto the same target hits the same conflict and stops
