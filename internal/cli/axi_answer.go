@@ -227,12 +227,25 @@ func followAnsweredReview(ctx context.Context, progress io.Writer, client *ipc.C
 		err = waitStepLeavesGate(graceCtx, socketPath, runID, review, gate.Status)
 		cancel()
 		if err != nil {
-			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			if graceExpired(ctx, err) {
 				return final, ciReady, nil
 			}
 			return nil, false, err
 		}
 	}
+}
+
+// graceExpired reports whether err ended a question park's grace on its own
+// rather than the outer --wait running out underneath it. ctx.Err() cannot
+// decide that: a run-state read reports a passed deadline before its context's
+// timer fires (deadlinePassedErr), and whenever the remaining --wait is shorter
+// than the grace, context.WithTimeout hands back a timerless cancel-child of
+// that same deadline, so an elapsed --wait arrives here as DeadlineExceeded
+// with a nil Err(). Credited to the grace it returned the park this answer just
+// closed as the run's next gate at exit 0, instead of the elapsed wait
+// isAxiWaitElapsed classifies from the same deadline.
+func graceExpired(ctx context.Context, err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) && !deadlinePassed(ctx)
 }
 
 // reviewGate returns the review step's gate when run is parked at it, whichever

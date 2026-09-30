@@ -69,13 +69,7 @@ func isAxiWaitElapsed(parent, drive context.Context, err error) bool {
 	if err == nil || parent.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if drive.Err() == context.DeadlineExceeded {
-		return true
-	}
-	// A read can see the deadline pass before the drive context's timer fires
-	// (deadlinePassedErr), so drive.Err() may still be nil here.
-	deadline, ok := drive.Deadline()
-	return ok && !time.Now().Before(deadline)
+	return deadlinePassed(drive)
 }
 
 func emitAxiWaitElapsed(cmd *cobra.Command, wait time.Duration, reattach string) error {

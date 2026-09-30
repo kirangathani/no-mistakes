@@ -46,3 +46,26 @@ func TestAxiWaitElapsedBeforeTheDriveTimerFires(t *testing.T) {
 		t.Fatal("a deadline error with no drive deadline was classified as an elapsed wait")
 	}
 }
+
+// A question park's grace and the outer --wait can both surface as
+// DeadlineExceeded with a nil Err(), and only the outer one must reach
+// isAxiWaitElapsed. Crediting the grace returned the park the answer had just
+// closed as the run's next gate at exit 0, telling a driving agent to answer
+// the same question again.
+func TestQuestionParkGraceIsNotCreditedWithTheWaitsOwnExpiry(t *testing.T) {
+	elapsedWait := passedDeadlineCtx{context.Background()}
+	if graceExpired(elapsedWait, context.DeadlineExceeded) {
+		t.Fatal("an elapsed --wait whose timer has not fired was credited to the question-park grace")
+	}
+	if !isAxiWaitElapsed(context.Background(), elapsedWait, context.DeadlineExceeded) {
+		t.Fatal("the same deadline was not classified as an elapsed wait")
+	}
+	live, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	if !graceExpired(live, context.DeadlineExceeded) {
+		t.Fatal("the grace expiring under a live --wait was not credited to the grace")
+	}
+	if graceExpired(live, context.Canceled) {
+		t.Fatal("a cancelled wait was read as the grace expiring")
+	}
+}

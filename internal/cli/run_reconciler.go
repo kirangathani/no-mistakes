@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -88,6 +89,19 @@ func deadlinePassedErr(ctx context.Context) error {
 		return err
 	}
 	return context.DeadlineExceeded
+}
+
+// deadlinePassed reports whether ctx has reached its own deadline, including
+// that same window, where the timer has not fired and ctx.Err() is still nil.
+// Every caller that has to tell its own bound's expiry from an outer one asks
+// this, so there is one answer to "has this deadline passed" rather than a
+// per-caller ctx.Err() test that is wrong inside the window.
+func deadlinePassed(ctx context.Context) bool {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
 }
 
 func (s *ipcRunStateSource) call(ctx context.Context, method string, params, result interface{}) error {
