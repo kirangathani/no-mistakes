@@ -310,6 +310,18 @@ daemon. The executor then resumes the reviewer's own session with the answers as
 its next message. From the reviewer's side an answer arrives as a message it did
 not ask for - a push - and it never learns that time passed.
 
+The caller is pushed to as well. The answer that closes the last open question
+does not return once it is recorded: like `axi respond`, it follows the run to
+its next decision point - the finalize turn's gate (findings, or a new
+question), `checks-passed`, or the outcome - bounded by `--wait`. Returning
+earlier left a driving agent with neither a gate to answer nor an outcome to
+report, while the finalize turn's next park reached nobody. The daemon's answer
+result carries `closed_last` for this, because `resumed` is false for an answer
+that lands before the park registers, even though the gate's resumer releases
+that park moments later. Such a park briefly still lists the answered question,
+so a question park seen right after the answer gets one
+`gate_reconcile_timeout` to leave before it is taken for a new question.
+
 A live `--input-format stream-json` stdin channel to a held-open subprocess was
 considered and rejected: a park lasts tens of minutes to hours, a daemon restart
 would kill the held process, and the reviewer has no idle window that channel
