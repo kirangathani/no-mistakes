@@ -57,6 +57,7 @@ func TestReviewStep_WordingOnlyReviewHandsOverDocNotesAndDoesNotPark(t *testing.
 	  "risk_level": "low",
 	  "risk_rationale": "prose only",
 	  "risk_scope": "source-or-external",
+	  "reviewed_paths": ["feature.txt"],
 	  "doc_report": [
 	    {"id":"doc1","file":"README.md","line":42,"problem":"README still says the flag defaults to false","right_looks_like":"state the new default (true) in the flag table"},
 	    {"id":"doc2","file":"internal/api/router.go","line":88,"problem":"comment overstates what the guard does","right_looks_like":"say it rejects only unauthenticated callers"},
@@ -111,6 +112,7 @@ func TestReviewStep_LintOnlyReviewHandsOverLintNotes(t *testing.T) {
 	  "risk_level": "low",
 	  "risk_rationale": "mechanical",
 	  "risk_scope": "source-or-external",
+	  "reviewed_paths": ["feature.txt"],
 	  "lint_report": [
 	    {"id":"lint1","file":"internal/a/a.go","line":7,"problem":"declared return type does not satisfy the interface; the type checker rejects it","right_looks_like":"return the interface type"}
 	  ]
