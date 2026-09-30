@@ -1,13 +1,20 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 	toon "github.com/toon-format/toon-go"
 )
 
@@ -33,6 +40,7 @@ import (
 // directory.
 func newAxiAnswerCmd() *cobra.Command {
 	var questionID, answer, answeredBy string
+	var wait time.Duration
 	cmd := &cobra.Command{
 		Use:   "answer",
 		Short: "Answer a question the reviewer asked while reviewing",
@@ -47,7 +55,11 @@ func newAxiAnswerCmd() *cobra.Command {
 			"question is left open, the daemon resumes that same reviewer session with\n" +
 			"the answers so it can finish - you do not approve or fix to release it.\n\n" +
 			"Answer with one of the question's stated options wherever you can; the\n" +
-			"reviewer wrote them so the answer would be unambiguous.",
+			"reviewer wrote them so the answer would be unambiguous.\n\n" +
+			"The answer that closes the last open question sets the run moving again,\n" +
+			"so, exactly like `axi respond`, it then blocks until the next gate,\n" +
+			"CI-ready decision point, or final outcome, bounded by --wait (default 8m).\n" +
+			"Any other answer returns at once.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -57,6 +69,7 @@ func newAxiAnswerCmd() *cobra.Command {
 					questionID: strings.TrimSpace(questionID),
 					answer:     strings.TrimSpace(answer),
 					answeredBy: strings.TrimSpace(answeredBy),
+					wait:       wait,
 				})
 			})
 		},
@@ -64,6 +77,7 @@ func newAxiAnswerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&questionID, "question", "", "question id, as carried by the review gate's `question-<id>` findings or named by the gate's omission notice (required)")
 	cmd.Flags().StringVar(&answer, "answer", "", "the answer, ideally one of the question's stated options (required)")
 	cmd.Flags().StringVar(&answeredBy, "by", "", "who answered, recorded on the PR and in the branch's settled questions")
+	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
 
@@ -71,12 +85,16 @@ type answerArgs struct {
 	questionID string
 	answer     string
 	answeredBy string
+	wait       time.Duration
 }
 
 func runAxiAnswer(cmd *cobra.Command, aa answerArgs) error {
 	if aa.questionID == "" || aa.answer == "" {
 		return emitError(cmd, 2, "--question and --answer are both required",
 			`Run `+"`no-mistakes axi status`"+` to list the reviewer's open questions and their ids`)
+	}
+	if err := validateAxiWait(aa.wait); err != nil {
+		return emitError(cmd, 2, err.Error(), "Pass a positive duration such as --wait 8m")
 	}
 
 	ctx := cmd.Context()
@@ -123,6 +141,38 @@ func runAxiAnswer(cmd *cobra.Command, aa answerArgs) error {
 	if result.Note != "" {
 		fields = append(fields, toon.Field{Key: "detail", Value: result.Note})
 	}
+	if result.ClosedLast {
+		// This answer set the run moving, so follow it to the next decision
+		// point exactly as respond does. Returning here instead left a driving
+		// agent with neither a gate to answer nor an outcome to report, while
+		// the finalize turn's next park reached nobody.
+		driveCtx, cancel, err := boundAxiWait(ctx, aa.wait)
+		if err != nil {
+			return emitError(cmd, 2, err.Error(), "Pass a positive duration such as --wait 8m")
+		}
+		defer cancel()
+		grace := env.cfg.GateReconcileTimeout
+		if grace <= 0 {
+			grace = config.DefaultGateReconcileTimeout
+		}
+		final, ciReady, err := followAnsweredReview(driveCtx, cmd.ErrOrStderr(), env.client, env.p.Socket(), runID, result.Resumed, grace)
+		if err != nil {
+			if isAxiWaitElapsed(ctx, driveCtx, err) {
+				return emitAxiWaitElapsed(cmd, aa.wait, "no-mistakes axi run")
+			}
+			return emitError(cmd, 1, fmt.Sprintf("follow the resumed review: %v", err),
+				"The answer is recorded; run `no-mistakes axi run` to reattach to the run")
+		}
+		// The run object that follows carries the id, so the scalar run key
+		// is dropped rather than emitted twice.
+		lead := make([]toon.Field, 0, len(fields))
+		for _, f := range fields {
+			if f.Key != "run" {
+				lead = append(lead, f)
+			}
+		}
+		return renderDriveResult(cmd, final, ciReady, lead...)
+	}
 	var help []string
 	switch {
 	case result.Open > 0:
@@ -135,4 +185,55 @@ func runAxiAnswer(cmd *cobra.Command, aa answerArgs) error {
 	fields = append(fields, toon.Field{Key: "help", Value: help})
 	emitDoc(cmd, fields...)
 	return nil
+}
+
+// followAnsweredReview drives a run whose last open review question was just
+// answered to its next decision point.
+//
+// Two parks must not be mistaken for that decision point. The gate this answer
+// released may still read as parked for a moment, which waitStepLeavesGate
+// covers exactly as it does for respond. And an answer that lands between the
+// reviewer's turn ending and the executor registering its park is recorded
+// before that park is published, so the park appears afterwards still carrying
+// the questions this answer closed until the gate's own resumer releases it.
+// Only the daemon can tell that park from a genuine new question, and it says
+// so by releasing it: the gate re-checks its conversation the moment it parks,
+// bounded by gate_reconcile_timeout. So each question park gets grace (that
+// same timeout, read from the owning root's global config) to leave, and one
+// still there after it asked something new and is returned.
+func followAnsweredReview(ctx context.Context, progress io.Writer, client *ipc.Client, socketPath, runID string, resumed bool, grace time.Duration) (*ipc.RunInfo, bool, error) {
+	review := string(types.StepReview)
+	parked := string(types.StepStatusAwaitingApproval)
+	if resumed {
+		if err := waitStepLeavesGate(ctx, socketPath, runID, review, parked); err != nil {
+			return nil, false, err
+		}
+	}
+	for {
+		final, ciReady, err := driveRun(ctx, progress, client, socketPath, runID, false)
+		if err != nil || !parkedOnReviewQuestions(final) {
+			return final, ciReady, err
+		}
+		graceCtx, cancel := context.WithTimeout(ctx, grace)
+		err = waitStepLeavesGate(graceCtx, socketPath, runID, review, parked)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+				return final, ciReady, nil
+			}
+			return nil, false, err
+		}
+	}
+}
+
+// parkedOnReviewQuestions reports whether run is parked at the review gate
+// with at least one review question on it.
+func parkedOnReviewQuestions(run *ipc.RunInfo) bool {
+	if run == nil {
+		return false
+	}
+	gate, ok := runViewFromIPC(run).awaitingStep()
+	return ok && gate.Name == string(types.StepReview) &&
+		gate.Status == string(types.StepStatusAwaitingApproval) &&
+		pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON)
 }
