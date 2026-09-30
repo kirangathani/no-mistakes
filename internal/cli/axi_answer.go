@@ -203,19 +203,28 @@ func runAxiAnswer(cmd *cobra.Command, aa answerArgs) error {
 // still there after it asked something new and is returned.
 func followAnsweredReview(ctx context.Context, progress io.Writer, client *ipc.Client, socketPath, runID string, resumed bool, grace time.Duration) (*ipc.RunInfo, bool, error) {
 	review := string(types.StepReview)
-	parked := string(types.StepStatusAwaitingApproval)
 	if resumed {
-		if err := waitStepLeavesGate(ctx, socketPath, runID, review, parked); err != nil {
+		run, err := getRunInfo(ctx, socketPath, runID)
+		if err != nil {
 			return nil, false, err
+		}
+		if gate, ok := reviewGate(run); ok {
+			if err := waitStepLeavesGate(ctx, socketPath, runID, review, gate.Status); err != nil {
+				return nil, false, err
+			}
 		}
 	}
 	for {
 		final, ciReady, err := driveRun(ctx, progress, client, socketPath, runID, false)
-		if err != nil || !parkedOnReviewQuestions(final) {
+		if err != nil {
 			return final, ciReady, err
 		}
+		gate, ok := reviewGate(final)
+		if !ok || !pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON) {
+			return final, ciReady, nil
+		}
 		graceCtx, cancel := context.WithTimeout(ctx, grace)
-		err = waitStepLeavesGate(graceCtx, socketPath, runID, review, parked)
+		err = waitStepLeavesGate(graceCtx, socketPath, runID, review, gate.Status)
 		cancel()
 		if err != nil {
 			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
@@ -226,14 +235,19 @@ func followAnsweredReview(ctx context.Context, progress io.Writer, client *ipc.C
 	}
 }
 
-// parkedOnReviewQuestions reports whether run is parked at the review gate
-// with at least one review question on it.
-func parkedOnReviewQuestions(run *ipc.RunInfo) bool {
+// reviewGate returns the review step's gate when run is parked at it, whichever
+// park status the executor picked: awaiting_approval for a review pass of its
+// own, fix_review for the rereview inside a fix round, which a question can be
+// asked by just the same. Every wait below is told the status this saw, since
+// waitStepLeavesGate reads any other status as a gate already left - so the
+// two comparisons can never drift apart.
+func reviewGate(run *ipc.RunInfo) (stepView, bool) {
 	if run == nil {
-		return false
+		return stepView{}, false
 	}
 	gate, ok := runViewFromIPC(run).awaitingStep()
-	return ok && gate.Name == string(types.StepReview) &&
-		gate.Status == string(types.StepStatusAwaitingApproval) &&
-		pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON)
+	if !ok || gate.Name != string(types.StepReview) {
+		return stepView{}, false
+	}
+	return gate, true
 }

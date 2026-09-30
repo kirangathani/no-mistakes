@@ -83,13 +83,13 @@ func tickingSubscribe(ctx context.Context, _ json.RawMessage) (ipc.StreamFunc, e
 	}, nil
 }
 
-func reviewParkedOn(t *testing.T, fx *axiTimeoutFixture, items ...types.Finding) func() *ipc.RunInfo {
+func reviewParkedOn(t *testing.T, fx *axiTimeoutFixture, status types.StepStatus, items ...types.Finding) func() *ipc.RunInfo {
 	raw := findingsJSON(t, items, "review")
 	return func() *ipc.RunInfo {
 		run := fx.running()
 		run.Steps = []ipc.StepResultInfo{{
 			StepName:     types.StepReview,
-			Status:       types.StepStatusAwaitingApproval,
+			Status:       status,
 			FindingsJSON: &raw,
 		}}
 		return run
@@ -122,8 +122,8 @@ func TestAxiAnswer_LastAnswerFollowsTheRunToItsNextGate(t *testing.T) {
 	var once sync.Once
 	var stale, next func() *ipc.RunInfo
 	build := func() {
-		stale = reviewParkedOn(t, fx, reviewQuestion("q1"))
-		next = reviewParkedOn(t, fx, reviewCodeFinding())
+		stale = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q1"))
+		next = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewCodeFinding())
 	}
 	fx, _ = newAnswerFollowFixture(t, "", closedLastResumed, []answerPhase{
 		{until: 150 * time.Millisecond, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
@@ -158,7 +158,7 @@ func TestAxiAnswer_LastAnswerSkipsTheStalePreAnswerPark(t *testing.T) {
 	fx, _ = newAnswerFollowFixture(t, "8s", ipc.AnswerReviewQuestionResult{OK: true, ClosedLast: true}, []answerPhase{
 		{until: 150 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
 		{until: 450 * time.Millisecond, run: func() *ipc.RunInfo {
-			once.Do(func() { stale = reviewParkedOn(t, fx, reviewQuestion("q1")) })
+			once.Do(func() { stale = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q1")) })
 			return stale()
 		}},
 		{until: 600 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
@@ -186,8 +186,8 @@ func TestAxiAnswer_GenuineReaskIsReturnedAfterTheGrace(t *testing.T) {
 	var once sync.Once
 	var stale, reask func() *ipc.RunInfo
 	build := func() {
-		stale = reviewParkedOn(t, fx, reviewQuestion("q1"))
-		reask = reviewParkedOn(t, fx, reviewQuestion("q2"))
+		stale = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q1"))
+		reask = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q2"))
 	}
 	fx, _ = newAnswerFollowFixture(t, "1s", closedLastResumed, []answerPhase{
 		{until: 100 * time.Millisecond, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
@@ -240,5 +240,37 @@ func TestAxiAnswer_LastAnswerWaitElapsedReattachesWithoutAnsweringAgain(t *testi
 	}
 	if strings.Contains(out, "Re-run `no-mistakes axi answer") {
 		t.Fatalf("post-answer timeout instructed the caller to answer again:\n%s", out)
+	}
+}
+
+// A question asked by the rereview inside a fix round parks as fix_review, so
+// both the released park and the next one carry that status. Keyed on the
+// review park status alone, the stale park read as already released and was
+// handed back as this answer's next decision point.
+func TestAxiAnswer_LastAnswerFollowsAFixReviewQuestionPark(t *testing.T) {
+	var fx *axiTimeoutFixture
+	var once sync.Once
+	var stale, next func() *ipc.RunInfo
+	build := func() {
+		stale = reviewParkedOn(t, fx, types.StepStatusFixReview, reviewQuestion("q1"))
+		next = reviewParkedOn(t, fx, types.StepStatusFixReview, reviewCodeFinding())
+	}
+	fx, _ = newAnswerFollowFixture(t, "", closedLastResumed, []answerPhase{
+		{until: 150 * time.Millisecond, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
+		{until: 300 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
+		{run: func() *ipc.RunInfo { once.Do(build); return next() }},
+	})
+
+	out, err := executeCmd("axi", "answer", "--question", "q1", "--answer", "Keep it", "--wait", "10s")
+	if err != nil {
+		t.Fatalf("axi answer: %v\n%s", err, out)
+	}
+	for _, want := range []string{"gate:", "review-1", "calls os.Exit"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("answer output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "question-q1") {
+		t.Fatalf("returned the fix_review gate the answer just released:\n%s", out)
 	}
 }
