@@ -59,6 +59,13 @@ func BindPreviousRunReviewRounds(sctx *StepContext) {
 	if sctx == nil || sctx.DB == nil || sctx.Repo == nil || sctx.Run == nil {
 		return
 	}
+	// The supersede channel exists for the conversation, so it is off with it:
+	// a repository that did not ask for the conversation gets the review prompt
+	// it got before this feature, and a superseded run's rounds stay where they
+	// already were - the uncertified-range channel and the branch decisions.
+	if sctx.Config == nil || !sctx.Config.Review.Conversation {
+		return
+	}
 	branch := strings.TrimSpace(sctx.Run.Branch)
 	if sctx.Repo.ID == "" || branch == "" {
 		return

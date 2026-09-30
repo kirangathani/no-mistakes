@@ -38,6 +38,13 @@ const (
 // it, and that is exactly the case a reader of the PR needs to see. It is
 // listed as unanswered rather than quietly omitted.
 func buildReviewConversationSection(sctx *pipeline.StepContext) string {
+	// Keyed on the setting, not on this run's evidence directory: a repository
+	// that turned the conversation off must publish the body it published
+	// before the feature existed, even where an earlier run left answers in the
+	// branch store.
+	if !reviewConversationEnabled(sctx) {
+		return ""
+	}
 	answered := publishedRunAnswers(sctx)
 	conv := publishedRunConversation(sctx)
 	withdrawn := conv.Withdrawn()
@@ -102,6 +109,10 @@ func publishedRunAnswers(sctx *pipeline.StepContext) []db.ReviewAnswer {
 	answers, _, err := sctx.DB.GetBranchReviewAnswers(sctx.Repo.ID, branch, db.MaxBranchReviewAnswers)
 	if err != nil {
 		slog.Warn("failed to read the review conversation for the PR body", "run_id", sctx.Run.ID, "error", err)
+		// A branch with nothing settled returns no rows and no error, so a
+		// failure here silently drops the answered half of the published
+		// conversation. Logged at ERROR rather than as a degradation.
+		slog.Error("failed to read the review conversation; the PR body will omit every answered question", "run_id", sctx.Run.ID, "error", err)
 		return nil
 	}
 	// GetBranchReviewAnswers is most-recent-first so its bound is a recency
@@ -138,4 +149,15 @@ func publishedConversationText(s string) string {
 		return s
 	}
 	return s[:maxPublishedConversationChars] + fmt.Sprintf("… (truncated, %d chars total)", len(s))
+// It counts RUNES, not bytes, and so does its disclosure: a question or answer
+// is ordinary prose, so a byte cut falls inside a multi-byte rune on nothing
+// more exotic than a typographic quote or an em dash and publishes invalid
+// UTF-8. This is the same shape as internal/cli's truncate.
+func publishedConversationText(s string) string {
+	s = sanitizePromptText(s)
+	runes := []rune(s)
+	if len(runes) <= maxPublishedConversationChars {
+		return s
+	}
+	return string(runes[:maxPublishedConversationChars]) + fmt.Sprintf("… (truncated, %d chars total)", len(runes))
 }

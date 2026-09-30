@@ -69,7 +69,7 @@ Core steps use these outcomes as applicable:
 - **Complete** cleanly and advance the pipeline.
 - **Return findings** with severity (`error`, `warning`, `info`) and an action (`auto-fix`, `ask-user`, `no-op`).
 - **Trigger auto-fix** if the step's `auto_fix` limit is above 0, the step result is auto-fixable, and any finding is `auto-fix`-eligible. The document step applies safe documentation fixes during its initial pass and, when `commands.lint` is empty, combines that pass with initial safe lint fixes before the lint step consumes its findings.
-- **Pause for approval** if blocking findings remain after auto-fix, or if any finding is `ask-user`.
+- **Pause for approval** if blocking findings remain after auto-fix, any finding is `ask-user`, or Review has a selected finding still awaiting positive rereview verification. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns that carry-forward rule.
 - **Skip** when there's nothing to do (e.g., no diff, unsupported host).
 - **Fail** on fatal errors and stop the pipeline.
 
@@ -80,7 +80,7 @@ See [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/) for how the fix cycle works
 You can't reorder steps. You *can*:
 
 - Swap the agent, or configure an ordered fallback list, globally or per-repo.
-- Set explicit `commands.lint`, `commands.format`, and an optional **targeted** `commands.test` (local intent validation only; not a full CI suite), with `commands.prepare` when their dependencies must be materialized once in the isolated worktree.
+- Set explicit `commands.lint`, `commands.format`, and an optional **targeted** `commands.test` (local intent validation only; not a full CI suite), with the [repository preparation settings](/no-mistakes/reference/repo-config/#commandsprepare) when the isolated worktree needs dependencies for configured commands or agent-only Test.
 - Store test evidence locally, upload GitHub.com/GHEC image/video attachments at PR time, and optionally publish an orphan evidence branch with `test.evidence`.
 - Control auto-fix limits per step.
 - Ignore paths during review and documentation checks.

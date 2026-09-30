@@ -48,6 +48,23 @@ func TestReviewQuestionGate_ShowsQuestionsDistinctlyAndLeadsWithAnswering(t *tes
 		"q1",
 		"Should the legacy /v1 route keep answering?",
 		"Keep answering | Remove it",
+// TestReviewQuestionGate_LeadsWithAnswering covers the `axi` half of
+// waiting-on-answers: an agent reading the gate must be able to tell "this
+// review wants an answer" from "this review wants a verdict", and must not
+// reach for approve or fix, which would discard the paused pass instead of
+// answering it.
+//
+// The question is surfaced as an ordinary finding row carrying its
+// `question-<id>` id and the reviewer's own description, not as a second
+// structured rendering: reconstructing question and options by splitting that
+// prose was a lossy round trip that rendered a wrong row for any question
+// whose text contained its own "Options: " line.
+func TestReviewQuestionGate_LeadsWithAnswering(t *testing.T) {
+	got := axiDoc(gateFields(reviewQuestionGate(t))...)
+
+	for _, want := range []string{
+		"question-q1",
+		"Should the legacy /v1 route keep answering?",
 		"no-mistakes axi answer --question",
 		"Do not approve or fix to get past a review question",
 	} {
@@ -67,6 +84,22 @@ func TestReviewQuestionGate_ShowsQuestionsDistinctlyAndLeadsWithAnswering(t *tes
 
 // A review gate with no open question keeps exactly today's shape: no
 // waiting_on marker, no answering guidance, approve/fix leading as before.
+// The help is keyed on the review-question CATEGORY through the shared
+// predicate, so a finding that merely looks like one by ID does not summon it.
+func TestReviewQuestionGateHelpKeysOnTheCategory(t *testing.T) {
+	gate := reviewQuestionGate(t)
+	gate.FindingsJSON = findingsJSON(t, []types.Finding{
+		{ID: "question-q1", Severity: "warning", Action: types.ActionAskUser, Description: "not actually a review question"},
+	}, "1 issue")
+
+	got := axiDoc(gateFields(gate)...)
+	if strings.Contains(got, "axi answer --question") {
+		t.Fatalf("a question-shaped ID summoned the answering help:\n%s", got)
+	}
+}
+
+// A review gate with no open question keeps exactly today's shape: no
+// answering guidance, approve/fix leading as before.
 func TestReviewGateWithoutQuestionsIsUnchanged(t *testing.T) {
 	gate := reviewQuestionGate(t)
 	gate.FindingsJSON = findingsJSON(t, []types.Finding{
@@ -75,6 +108,7 @@ func TestReviewGateWithoutQuestionsIsUnchanged(t *testing.T) {
 
 	got := axiDoc(gateFields(gate)...)
 	for _, unwanted := range []string{"waiting_on", "review_questions", "axi answer --question"} {
+	for _, unwanted := range []string{"axi answer --question", "Do not approve or fix"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("ordinary review gate leaked %q:\n%s", unwanted, got)
 		}
@@ -122,5 +156,19 @@ func TestReviewQuestionRowsIgnoreFindingsWithNoQuestionID(t *testing.T) {
 	}
 	if rows := reviewQuestionRows("not json"); len(rows) != 0 {
 		t.Fatalf("unparseable findings produced rows: %+v", rows)
+// TestAxiAnswerHasNoRunFlag pins the removal. `axi`'s run resolution is
+// branch-scoped by design, and answer MUTATES: a --run would be a second
+// selection path that could land an answer meant for one branch's reviewer on
+// another's. Reintroducing the flag is a deliberate scope decision, so it
+// should have to change this test to happen.
+func TestAxiAnswerHasNoRunFlag(t *testing.T) {
+	cmd := newAxiAnswerCmd()
+	if f := cmd.Flags().Lookup("run"); f != nil {
+		t.Fatalf("axi answer must not take --run; its run is the current branch's active run")
+	}
+	for _, want := range []string{"question", "answer", "by"} {
+		if cmd.Flags().Lookup(want) == nil {
+			t.Fatalf("axi answer is missing --%s", want)
+		}
 	}
 }
