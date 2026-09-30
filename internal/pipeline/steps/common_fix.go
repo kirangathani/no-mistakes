@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"strings"
 	"unicode/utf8"
 
@@ -48,17 +49,24 @@ type commitSummary struct {
 var errRejectedCommitSummary = errors.New("rejected commit summary")
 
 const (
-	noChangesAppliedSummary = "no changes applied"
+	// NoChangesAppliedSummary is the fix result of a round that changed
+	// nothing; it is not a fix the pipeline applied.
+	NoChangesAppliedSummary = "no changes applied"
 	changesAppliedSummary   = "changes applied"
 )
 
 const fixerRemovalRule = `
 
 Removal-first rule:
-- When a problem can be solved by removing a code path that is not strictly required to satisfy the intent - an extra acceptance or matching branch, a fallback, an alias, a second definition of something the code already defines once, or handling for an input nobody intends - fix it by removing that path, not by validating, hardening, or documenting it. Judge what the intent strictly requires against the User intent section when present, otherwise against the change's own stated purpose. Removal is the smallest fix for such a path: hardening it leaves the unrequired path in place for the next review to find another hole in.`
+- When a problem can be solved by removing a code path that is not strictly required to satisfy the intent - an extra acceptance or matching branch, a fallback, an alias, a second definition of something the code already defines once, or handling for an input nobody intends - fix it by removing that path, not by validating, hardening, or documenting it. Judge what the intent strictly requires against the User intent section when present, otherwise against the change's own stated purpose. Later recorded human fix decisions supersede conflicting original intent. Removal is the smallest fix for such a path: hardening it leaves the unrequired path in place for the next review to find another hole in.`
 
+// fixerPrompt wraps every shared fix-turn prompt with the two rules that apply
+// to all of them: the removal-first rule and the limit on independently
+// initiated memory-file edits. Review, Test, Lint, and custom-gate fix turns
+// route through executeFixMode, and the Lint agent pass and the CI repair wrap
+// their prompts the same way, so this is the insertion point for fix-turn rules.
 func fixerPrompt(prompt string) string {
-	return prompt + fixerRemovalRule
+	return prompt + fixerRemovalRule + agent.MemoryFilesRule
 }
 
 var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
@@ -77,6 +85,151 @@ func hasBlockingFindings(items []Finding) bool {
 		}
 	}
 	return false
+}
+
+// reviewedPathsCoverReviewable reports whether reviewedPaths (a review turn's
+// self-reported coverage) exactly covers reviewablePaths. Comparison is by
+// cleaned path so "./x" and "x" match.
+func reviewedPathsCoverReviewable(reviewedPaths, reviewablePaths []string) bool {
+	allowed := make(map[string]bool, len(reviewablePaths))
+	for _, candidate := range reviewablePaths {
+		normalized := normalizeReviewedPath(candidate)
+		if normalized == "" {
+			return false
+		}
+		allowed[normalized] = true
+	}
+	covered := make(map[string]bool, len(reviewedPaths))
+	for _, reviewed := range reviewedPaths {
+		normalized := normalizeReviewedPath(reviewed)
+		if normalized == "" || !allowed[normalized] {
+			return false
+		}
+		covered[normalized] = true
+	}
+	for candidate := range allowed {
+		if !covered[candidate] {
+			return false
+		}
+	}
+	return true
+}
+
+// uncoveredReviewablePaths returns the reviewable paths that no reviewed_paths
+// entry covers, in reviewable order. Out-of-scope entries cannot cover
+// anything, so they are ignored here; the strict
+// reviewedPathsCoverReviewable check still fails the round for them.
+func uncoveredReviewablePaths(reviewedPaths, reviewablePaths []string) []string {
+	covered := make(map[string]bool, len(reviewedPaths))
+	for _, reviewed := range reviewedPaths {
+		covered[normalizeReviewedPath(reviewed)] = true
+	}
+	var missing []string
+	for _, candidate := range reviewablePaths {
+		if !covered[normalizeReviewedPath(candidate)] {
+			missing = append(missing, candidate)
+		}
+	}
+	return missing
+}
+
+// hasInvalidReviewedPath reports whether a coverage record contains an entry
+// that does not normalize to a path at all (empty, whitespace, or "."). Such
+// an entry is invalid coverage evidence: reviewedPathsCoverReviewable fails on
+// it, so the round can only park, and no further review can cure it.
+func hasInvalidReviewedPath(reviewedPaths []string) bool {
+	for _, reviewed := range reviewedPaths {
+		if normalizeReviewedPath(reviewed) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeReviewedPaths unions two coverage records, keeping each path's first
+// spelling and order. It is the deterministic merge behind the focused
+// coverage pass: the round's record is what its turns actually examined
+// together, and the strict coverage check re-runs on the union.
+//
+// An entry that does not normalize to a path is kept, not folded away: it is
+// invalid coverage evidence, and dropping it would let the completion turn
+// launder the invalidity out of the union and certify a record that never had
+// positive coverage. Keeping one such entry makes reviewedPathsCoverReviewable
+// keep failing on the union, so the round parks with it named.
+func mergeReviewedPaths(first, second []string) []string {
+	seen := make(map[string]bool, len(first)+len(second))
+	var merged []string
+	invalidKept := false
+	for _, path := range append(append([]string(nil), first...), second...) {
+		key := normalizeReviewedPath(path)
+		if key == "" {
+			if invalidKept {
+				continue
+			}
+			invalidKept = true
+		} else {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
+		merged = append(merged, path)
+	}
+	return merged
+}
+
+// uncoveredReviewMessage names why a clean review round is parked instead of
+// certifying the head: the reviewable files its reviewed_paths did not cover
+// (or the whole set when the field was omitted), and any path it claimed that
+// is not a reviewable changed file.
+func uncoveredReviewMessage(reviewedPaths, reviewablePaths []string) string {
+	if reviewedPaths == nil {
+		return fmt.Sprintf("review reported no reviewed_paths; parking for approval with %d reviewable file(s) unverified: %s", len(reviewablePaths), strings.Join(reviewablePaths, ", "))
+	}
+	allowed := make(map[string]bool, len(reviewablePaths))
+	for _, candidate := range reviewablePaths {
+		allowed[normalizeReviewedPath(candidate)] = true
+	}
+	covered := make(map[string]bool, len(reviewedPaths))
+	var outOfScope []string
+	for _, reviewed := range reviewedPaths {
+		normalized := normalizeReviewedPath(reviewed)
+		if normalized == "" {
+			outOfScope = append(outOfScope, `""`)
+			continue
+		}
+		if !allowed[normalized] {
+			outOfScope = append(outOfScope, reviewed)
+			continue
+		}
+		covered[normalized] = true
+	}
+	var missing []string
+	for _, candidate := range reviewablePaths {
+		if !covered[normalizeReviewedPath(candidate)] {
+			missing = append(missing, candidate)
+		}
+	}
+	msg := "review coverage is incomplete; parking for approval"
+	if len(missing) > 0 {
+		msg += fmt.Sprintf(" with %d reviewable file(s) unverified: %s", len(missing), strings.Join(missing, ", "))
+	}
+	if len(outOfScope) > 0 {
+		msg += fmt.Sprintf("; %d reviewed_paths entry(ies) outside the reviewable set: %s", len(outOfScope), strings.Join(outOfScope, ", "))
+	}
+	return msg
+}
+
+func normalizeReviewedPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	cleaned := path.Clean(value)
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
 }
 
 // assertPipelineHeadContinuity fails closed when the worktree HEAD is no longer
@@ -303,7 +456,7 @@ func fixResultSummary(committed bool) string {
 	if committed {
 		return changesAppliedSummary
 	}
-	return noChangesAppliedSummary
+	return NoChangesAppliedSummary
 }
 
 func extractCommitSummary(result *agent.Result) (string, error) {

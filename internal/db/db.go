@@ -40,6 +40,10 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 	}
+	if err := migrateForkReviewQuestions(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrate db: %w", err)
+	}
 	return &DB{sql: sqlDB}, nil
 }
 

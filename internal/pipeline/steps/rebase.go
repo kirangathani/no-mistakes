@@ -48,7 +48,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 
 	sctx.Log("fetching latest upstream state...")
 	if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
-		sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", defaultBranch, err))
+		return nil, fmt.Errorf("fetch base branch %q before rebase: %w", defaultBranch, err)
 	}
 	// Sync the push branch's remote-tracking ref only when we are about to rebase
 	// onto it (a normal push). On a force push we deliberately skip both the fetch
@@ -120,7 +120,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		outcome, err := updateHeadSHA(ctx, sctx)
 		if err == nil {
 			if sctx.Run.HeadSHA == before {
-				outcome.FixSummary = noChangesAppliedSummary
+				outcome.FixSummary = NoChangesAppliedSummary
 				sctx.Log("no changes applied: branch already up to date")
 			} else {
 				outcome.FixSummary = changesAppliedSummary
@@ -299,7 +299,7 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 	)
 	fixSummary := ""
 	if sctx.Fixing {
-		fixSummary = noChangesAppliedSummary
+		fixSummary = NoChangesAppliedSummary
 		const explanation = "no changes applied: bundled local-default commits require manual separation or explicit approval"
 		description += "\n\n" + explanation + "; the rebase conflict resolver cannot safely select commits to discard."
 		sctx.Log(explanation)
@@ -462,6 +462,7 @@ Instructions:
 		targetRef,
 		strings.Join(conflictFiles, "\n- "),
 	)
+	prompt += "\n" + agent.MemoryFilesConflictRule
 	if sctx.PreviousFindings != "" {
 		prompt += "\n\nPrevious findings:\n" + sctx.PreviousFindings
 	}
@@ -560,6 +561,19 @@ func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef s
 		return nil
 	}
 
+	// Snapshot what the merge must prove before it runs. The target is pinned
+	// to a SHA here rather than checked by refname afterwards because an agent
+	// that fetches while resolving can advance the ref under us and fail a
+	// merge that actually landed.
+	preMergeHead, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("get pre-merge head: %w", err)
+	}
+	targetSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", targetRef)
+	if err != nil {
+		return fmt.Errorf("get target head %s: %w", targetRef, err)
+	}
+
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
 	if _, err := git.Run(ctx, sctx.WorkDir, mergeArgs(targetRef)...); err == nil {
 		return nil
@@ -591,6 +605,7 @@ Instructions:
 		targetRef,
 		strings.Join(conflictFiles, "\n- "),
 	)
+	prompt += "\n" + agent.MemoryFilesConflictRule
 	if sctx.PreviousFindings != "" {
 		prompt += "\n\nPrevious findings:\n" + sctx.PreviousFindings
 	}
@@ -616,7 +631,80 @@ Instructions:
 		return fmt.Errorf("agent did not complete the merge")
 	}
 
+	// A conflicted rebase is the other way the worktree can be left mid
+	// operation, and git sets no MERGE_HEAD for it: an agent that abandons the
+	// merge and rebases onto the same target hits the same conflict and stops
+	// with rebase state in place. Abort it first, or the restore below would
+	// move HEAD while the interrupted rebase survives underneath it.
+	if rebaseInProgress(ctx, sctx.WorkDir) {
+		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: a rebase was left in progress", targetRef))
+	}
+
+	// Concluded is not the same as merged. Requiring HEAD to have moved and to
+	// carry BOTH snapshots proves a merge happened, because shouldSkipRebase
+	// has already returned early unless preMergeHead and targetSHA are
+	// divergent: two divergent commits can only both be ancestors of HEAD if
+	// some commit in its history has two parents joining those lines. It also
+	// proves the reviewed head itself was not rewritten, which target ancestry
+	// alone never did and which the CI continuity rule and the attestation's
+	// head binding both depend on. Every way of ending the conflict without
+	// merging fails it: `git merge --abort` leaves HEAD where it was, and a
+	// rebase or a `git reset --hard` onto the target drops the reviewed head
+	// out of the history.
+	head, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("get merged head: %w", err))
+	}
+	if head == preMergeHead {
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: the branch is still at %s", targetRef, preMergeHead))
+	}
+	if !isAncestor(ctx, sctx.WorkDir, preMergeHead, head) {
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: the reviewed head %s is not in %s", targetRef, preMergeHead, head))
+	}
+	if !isAncestor(ctx, sctx.WorkDir, targetSHA, head) {
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: %s is not in %s", targetRef, targetSHA, head))
+	}
+
 	return nil
+}
+
+// restorePreMergeHead puts the worktree back on the reviewed head before a
+// shape guard's rejection is returned. Without it a rejected merge leaves the
+// branch on whatever the agent actually produced - a rebase of the reviewed
+// head, a reset onto the target, an unrelated commit - and the step fails while
+// the invalid head stays checked out, so any later hand-off, recovery, or
+// retry reads it as the branch's real state.
+//
+// It is fail-closed: a restore that does not land back exactly on
+// preMergeHead with a clean tree is reported as part of the returned error,
+// never swallowed, so nothing is described as recovered that was not.
+func restorePreMergeHead(ctx context.Context, sctx *pipeline.StepContext, preMergeHead string, cause error) error {
+	if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", preMergeHead); err != nil {
+		return fmt.Errorf("%w; restoring the branch to %s failed, the worktree is left at the rejected head: %v", cause, preMergeHead, err)
+	}
+	head, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("%w; restoring the branch to %s could not be verified: %v", cause, preMergeHead, err)
+	}
+	if head != preMergeHead {
+		return fmt.Errorf("%w; restoring the branch to %s left it at %s instead", cause, preMergeHead, head)
+	}
+	// HEAD reading as preMergeHead is not the same as the worktree being back on
+	// it: a reset performed while a rebase is interrupted moves HEAD and leaves
+	// the rebase underneath it, so the restore would otherwise report a
+	// recovery it never performed.
+	//
+	// HEAD ATTACHMENT is deliberately not verified here. The pipeline's run
+	// worktree is created detached (`git worktree add --detach`) and no step
+	// ever checks a branch out in it, so requiring an attached HEAD would
+	// report every correct restore as a failed one. Detachment carries no
+	// signal in this worktree; the reviewed-commit comparison above is what
+	// proves the restore.
+	if rebaseInProgress(ctx, sctx.WorkDir) {
+		return fmt.Errorf("%w; restoring the branch to %s left a rebase in progress", cause, preMergeHead)
+	}
+	return cause
 }
 
 // shouldSkipRebase checks whether a rebase onto targetRef can be skipped.
@@ -733,8 +821,14 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 
 	// Check if the branch has any diff against the default branch.
 	// If the diff is empty (e.g. branch was already merged), skip remaining steps.
+	// Execute already fetched the base branch (fail-closed) before integrating,
+	// so reuse that ref instead of fetching again after HEAD was rewritten and
+	// persisted: a failure here could not undo either.
 	defaultBranch := effectivePRBaseBranch(sctx)
-	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, defaultBranch)
+	baseSHA := mergeBaseWithDefaultBranch(ctx, sctx.WorkDir, defaultBranch)
+	if baseSHA == "" {
+		baseSHA = resolveBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, defaultBranch)
+	}
 	diff, err := git.Diff(ctx, sctx.WorkDir, baseSHA, "HEAD")
 	if err == nil && strings.TrimSpace(diff) == "" {
 		sctx.Log("empty diff after rebase, skipping remaining steps")

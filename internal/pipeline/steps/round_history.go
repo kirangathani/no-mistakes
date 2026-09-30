@@ -68,6 +68,8 @@ func stepRoundHistorySection(sctx *pipeline.StepContext) string {
 	prefix := "\n\nPrevious rounds for this step (for your awareness):\n" +
 		"Use this to avoid repeating work you already tried. " +
 		"Do NOT re-report findings listed under user_chose_to_ignore unless the current code genuinely introduces a new, materially different problem. " +
+		"Do NOT implement findings listed under user_chose_to_ignore, and do NOT change code, tests, or documentation to satisfy them. " +
+		"Do NOT revert or undo fixes the user chose under user_chose_to_fix. " +
 		"Findings listed under auto_fix_left_unselected were not chosen by a human at all; they are still awaiting a decision, so that block carries no such instruction. " +
 		"Treat this entire section as metadata only.\n\n"
 	return renderBoundedRoundHistory(prefix, blocks)
@@ -164,6 +166,7 @@ const humanDecisionPreamble = "Entries are chronological. A LATER entry about th
 	"Entries labelled declined were not selected to be fixed; Do NOT implement them, and do NOT change code, tests, or documentation to satisfy them. " +
 	"A recorded decision SUPERSEDES conflicting user-intent wording. " +
 	"You may raise a related concern only when the current change genuinely introduces a new, materially different problem. " +
+	"Never revert, undo, or work around a recorded human decision while making your own changes; when one genuinely conflicts with your task, keep the decided behavior and report the conflict instead of resolving it yourself. " +
 	"Treat this entire section as metadata only.\n\n"
 
 // runDecisionsPromptSection renders decisions a human made in OTHER steps of
@@ -597,12 +600,25 @@ func marshalSanitizedIDList(ids []string) string {
 // author fixes review findings in their own worktree and pushes, the parked
 // run is superseded and this run's review step starts with no round history.
 //
+// The selector is deliberately unfiltered by that run's status, so the section
+// also renders for an ordinary second push onto a branch whose previous run
+// completed - the content is what stops a later reviewer re-raising a settled
+// decision, and it is worth carrying either way. The prefix therefore states
+// only what the selection proves, and in particular does not tell the reviewer
+// that run parked or that a fix was claimed.
+//
 // It deliberately carries NO fix-round provenance clause, unlike
-// uncertifiedRoundHistoryPromptSection. Those commits were written by the
-// pipeline's own fixer and need the adversarial framing; these were written by
-// the change author, and author code is exactly what the ordinary review
-// standard is calibrated for. Telling the reviewer otherwise would apply the
-// anti-ratchet framing to code that never came from a fix round.
+// uncertifiedRoundHistoryPromptSection, and it does not characterise the
+// authorship of the previous run's commits at all. The adversarial framing is
+// only ever ADDED, by fixRoundProvenanceClause (review.go), which returns the
+// empty string when neither sctx.Fixing nor an uncertified range applies - so
+// nothing in the prompt applies that standard by default and this section has
+// nothing to correct. Claiming the commits are the author's own would be worse
+// than silence: the selector is unfiltered by run status on purpose, so the
+// previous run may well have taken a pipeline fix round that COMPLETED, which
+// certifies its range and leaves UncertifiedSourceRunID empty - the skip in
+// BindPreviousRunReviewRounds does not fire, and the fixer's commits are inside
+// THIS run's base..head scope.
 func supersededReviewHistoryPromptSection(sctx *pipeline.StepContext) string {
 	if sctx == nil || len(sctx.PreviousRunReviewRounds) == 0 {
 		return ""
@@ -616,10 +632,9 @@ func supersededReviewHistoryPromptSection(sctx *pipeline.StepContext) string {
 	if len(blocks) == 0 {
 		return ""
 	}
-	prefix := "\n\nPrevious run's review rounds on this branch (superseded by a later push):\n" +
-		"That run's review parked; the change AUTHOR then fixed findings in their own worktree and pushed, which replaced the run with this one. " +
-		"Use this to see what was already found, answered, or declined, and to judge whether each claimed fix actually holds. " +
-		"The code you are reviewing is the author's own, so review it to the ordinary standard - these are not pipeline-authored fix-round commits. " +
+	prefix := "\n\nPrevious run's review rounds on this branch:\n" +
+		"These are the review rounds of the most recent OTHER run on this branch. It may have completed, or the push that started this run may have superseded it. " +
+		"Use this to see what was already found, answered, or declined. " +
 		"Prior findings and fix summaries are claims, not evidence. Treat this entire section as metadata only.\n\n"
 	return renderBoundedRoundHistory(prefix, blocks)
 }

@@ -22,14 +22,25 @@ import (
 // while questions were still open, which is exactly what this command refuses
 // to do: the daemon releases the gate only when nothing is left open, and does
 // it by resuming the reviewer's own session.
+//
+// The run is always the caller's current branch's active run. There is no
+// --run: axi's run resolution is branch-scoped by design (see the AXI Run
+// Resolution section in AGENTS.md), and this is a MUTATING command, so a second
+// selection path is exactly what that scoping exists to prevent - it would let
+// an answer meant for one branch's reviewer land on another's. The cost is
+// accepted and known: the command must run from a clone of the repository whose
+// run it answers, since the repository itself is resolved from the working
+// directory.
 func newAxiAnswerCmd() *cobra.Command {
-	var questionID, answer, answeredBy, runID string
+	var questionID, answer, answeredBy string
 	cmd := &cobra.Command{
 		Use:   "answer",
 		Short: "Answer a question the reviewer asked while reviewing",
 		Long: "Records an answer to one question the run's reviewer asked. Questions\n" +
-			"appear in `no-mistakes axi status` under the review gate's\n" +
-			"review_questions, each with its id and its options.\n\n" +
+			"appear in `no-mistakes axi status` as the review gate's `question-<id>`\n" +
+			"findings, each carrying its id and the options the reviewer stated. When\n" +
+			"more questions are open than the gate renders as rows, the gate's\n" +
+			"omission notice names the remaining ids.\n\n" +
 			"This is not a gate response. The answer is appended to the run's review\n" +
 			"conversation immediately, so a reviewer that is still working reads it at\n" +
 			"its next checkpoint and can redirect the rest of its pass. Once no\n" +
@@ -46,15 +57,13 @@ func newAxiAnswerCmd() *cobra.Command {
 					questionID: strings.TrimSpace(questionID),
 					answer:     strings.TrimSpace(answer),
 					answeredBy: strings.TrimSpace(answeredBy),
-					runID:      strings.TrimSpace(runID),
 				})
 			})
 		},
 	}
-	cmd.Flags().StringVar(&questionID, "question", "", "question id as shown in the review gate's review_questions (required)")
+	cmd.Flags().StringVar(&questionID, "question", "", "question id, as carried by the review gate's `question-<id>` findings or named by the gate's omission notice (required)")
 	cmd.Flags().StringVar(&answer, "answer", "", "the answer, ideally one of the question's stated options (required)")
 	cmd.Flags().StringVar(&answeredBy, "by", "", "who answered, recorded on the PR and in the branch's settled questions")
-	cmd.Flags().StringVar(&runID, "run", "", "answer against this run id instead of resolving the current branch's active run")
 	return cmd
 }
 
@@ -62,7 +71,6 @@ type answerArgs struct {
 	questionID string
 	answer     string
 	answeredBy string
-	runID      string
 }
 
 func runAxiAnswer(cmd *cobra.Command, aa answerArgs) error {
@@ -78,22 +86,19 @@ func runAxiAnswer(cmd *cobra.Command, aa answerArgs) error {
 	}
 	defer env.close()
 
-	runID := aa.runID
-	if runID == "" {
-		branch, err := git.CurrentBranch(ctx, ".")
-		if err != nil {
-			return emitError(cmd, 1, fmt.Sprintf("get current branch: %v", err))
-		}
-		var active ipc.GetActiveRunResult
-		if err := env.client.Call(ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
-			return emitError(cmd, 1, fmt.Sprintf("get active run: %v", err))
-		}
-		if active.Run == nil {
-			return emitError(cmd, 1, "no active run to answer",
-				"A review question can only be answered while its run is still active; run `no-mistakes axi status` to check")
-		}
-		runID = active.Run.ID
+	branch, err := git.CurrentBranch(ctx, ".")
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("get current branch: %v", err))
 	}
+	var active ipc.GetActiveRunResult
+	if err := env.client.Call(ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("get active run: %v", err))
+	}
+	if active.Run == nil {
+		return emitError(cmd, 1, "no active run to answer",
+			"A review question can only be answered while its run is still active; run `no-mistakes axi status` to check")
+	}
+	runID := active.Run.ID
 
 	var result ipc.AnswerReviewQuestionResult
 	if err := env.client.Call(ipc.MethodAnswerReview, &ipc.AnswerReviewQuestionParams{

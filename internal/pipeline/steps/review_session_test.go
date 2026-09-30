@@ -82,9 +82,12 @@ func (a *sessionFallbackTimeoutAgent) Run(ctx context.Context, opts agent.RunOpt
 
 // reviewSessionHarness wires a real executor around real steps with a
 // session-capable mock agent and real git worktree.
-func reviewSessionHarness(t *testing.T, mock *sessionMockAgent, steps []pipeline.Step) (*pipeline.Executor, *db.DB, *db.Run, *db.Repo, string) {
+// tweaks adjust the run's effective config before the executor is built, for
+// the tests of a setting the harness must not turn on by default.
+func reviewSessionHarness(t *testing.T, mock *sessionMockAgent, steps []pipeline.Step, tweaks ...func(*config.Config)) (*pipeline.Executor, *db.DB, *db.Run, *db.Repo, string) {
 	t.Helper()
 	workDir, baseSHA, headSHA := setupGitRepo(t)
+	ensureHermeticOrigin(t, workDir)
 
 	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {
@@ -105,6 +108,9 @@ func reviewSessionHarness(t *testing.T, mock *sessionMockAgent, steps []pipeline
 		Agent:        types.AgentClaude,
 		AutoFix:      config.AutoFix{Review: 3},
 		SessionReuse: true,
+	}
+	for _, tweak := range tweaks {
+		tweak(cfg)
 	}
 	exec := pipeline.NewExecutor(database, paths.WithRoot(t.TempDir()), cfg, mock, steps, nil)
 	return exec, database, run, repo, workDir
@@ -133,17 +139,15 @@ func fixCalls(calls []agent.RunOpts) []agent.RunOpts {
 // TestReviewLoop_IndependentReviewTurnsOneFixerSession drives the real review
 // step through the executor's auto-fix loop for multiple rounds and proves:
 // every review turn (the initial review and every post-fix rereview) runs
-// cold, N fix rounds share ONE durable fixer session, the review turns never
-// receive the fixer's identity, and every review round still asks for a full
-// review pass of the branch.
+// session-free, N fix rounds share ONE durable fixer session, the review
+// turns never receive the fixer's identity, and every review round still asks
+// for a full review pass of the branch.
 //
-// No review ROUND inherits another round's session: round N's fixes implement
-// round N-1's review findings, so resuming the prescriber's session would seat
-// it as their certifier. The initial review may START a reviewer session - it
-// is the asking turn of a review pass, whose finalize turn resumes it - but the
-// review step Forgets that identity before any fix round, so every rereview
-// here is cold. The cross-round context a rereview legitimately needs travels
-// in the explicit sanitized round-history prompt section instead.
+// Review turns are deliberately session-free: round N's fixes implement round
+// N-1's review findings, so resuming any prior review turn's session would
+// seat the prescriber of those fixes as their certifier. The cross-round
+// context a rereview legitimately needs travels in the explicit sanitized
+// round-history prompt section instead.
 func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 	reviewRound := 0
 	mock := &sessionMockAgent{}
@@ -153,11 +157,11 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 			reviewRound++
 			if reviewRound <= 2 {
 				return &agent.Result{Output: []byte(fmt.Sprintf(
-					`{"findings":[{"id":"f-%d","severity":"error","description":"bug %d","action":"auto-fix"}],"summary":"issues","risk_level":"medium","risk_rationale":"bugs","risk_scope":"source-or-external"}`,
+					`{"findings":[{"id":"f-%d","severity":"error","file":"feature.txt","description":"bug %d","action":"auto-fix"}],"summary":"issues","risk_level":"medium","risk_rationale":"bugs","risk_scope":"source-or-external","reviewed_paths":["feature.txt"]}`,
 					reviewRound, reviewRound,
 				))}
 			}
-			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["feature.txt"]}`)}
 		case "review-fix":
 			return &agent.Result{Output: []byte(`{"summary":"fix the bug"}`)}
 		default:
@@ -181,24 +185,19 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 		t.Fatalf("expected 2 fix rounds, got %d", len(fixes))
 	}
 
-	// The initial review starts a reviewer session for its own pass; no review
-	// turn ever RESUMES one here, because each rereview follows a fix round
-	// whose entry dropped the identity.
-	if reviews[0].Session == nil || reviews[0].Session.ID != "" {
-		t.Fatalf("initial review must start a fresh reviewer session, got %+v", reviews[0].Session)
-	}
-	for i, call := range reviews[1:] {
+	// Every review turn is session-free: no identity to start, none resumed.
+	for i, call := range reviews {
 		if call.Session != nil {
-			t.Fatalf("rereview after fix round %d must be cold, got session %+v", i+1, call.Session)
+			t.Fatalf("review round %d must run session-free, got session %+v", i+1, call.Session)
 		}
 	}
 
 	// One durable fixer session: started on the first fix turn, resumed on
-	// the second. Its id is sess-2 because the initial review minted sess-1.
+	// the second.
 	if fixes[0].Session == nil || fixes[0].Session.ID != "" {
 		t.Fatalf("first fix must start the fixer session, got %+v", fixes[0].Session)
 	}
-	fixerID := "sess-2"
+	fixerID := "sess-1"
 	if fixes[1].Session == nil || fixes[1].Session.ID != fixerID {
 		t.Fatalf("second fix must resume %s, got %+v", fixerID, fixes[1].Session)
 	}
@@ -214,15 +213,14 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 		}
 	}
 
-	// The persisted resume metadata is the minimum, and after a fix round only
-	// the fixer role has any: entering the fix round deleted the reviewer row,
-	// so no stale reviewer identity is left behind for a later turn to resume.
+	// The persisted resume metadata is the minimum, and only the fixer role
+	// has any: review turns never mint a durable identity.
 	sessions, err := database.GetRunAgentSessions(run.ID)
 	if err != nil {
 		t.Fatalf("get sessions: %v", err)
 	}
 	if len(sessions) != 1 {
-		t.Fatalf("expected 1 persisted role session (fixer), got %d: %+v", len(sessions), sessions)
+		t.Fatalf("expected 1 persisted role session (fixer), got %d", len(sessions))
 	}
 	if sessions[0].Role != string(pipeline.SessionRoleFixer) || sessions[0].SessionID == "" || sessions[0].Agent != "session-mock" {
 		t.Fatalf("unexpected persisted session: %+v", sessions[0])
@@ -247,10 +245,10 @@ func TestReviewLoop_RereviewNeverResumesTheSessionThatPrescribedItsFixes(t *test
 			reviewRound++
 			if reviewRound == 1 {
 				return &agent.Result{Output: []byte(
-					`{"findings":[{"id":"f-1","severity":"error","description":"prescribed design","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external"}`,
+					`{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","description":"prescribed design","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external","reviewed_paths":["feature.txt"]}`,
 				)}
 			}
-			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["feature.txt"]}`)}
 		case "review-fix":
 			return &agent.Result{Output: []byte(`{"summary":"implement the prescription"}`)}
 		default:
@@ -286,10 +284,15 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 			reviewRound++
 			if reviewRound == 1 {
 				return &agent.Result{Output: []byte(
-					`{"findings":[{"id":"f-1","severity":"error","description":"needs decision","action":"ask-user"}],"summary":"1 issue","risk_level":"high","risk_rationale":"gate","risk_scope":"source-or-external"}`,
+					`{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","description":"needs decision","action":"ask-user"}],"summary":"1 issue","risk_level":"high","risk_rationale":"gate","risk_scope":"source-or-external"}`,
 				)}
 			}
-			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}
+			// The rereview positively covers the file the selected finding lives
+			// in and no longer reports the defect: that coverage record is what
+			// lets the carried finding leave the outstanding set. A rereview that
+			// reports nothing new without covering the file would leave it
+			// outstanding and park the run again.
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["feature.txt"]}`)}
 		default:
 			return &agent.Result{Output: []byte(`{"summary":"apply decision"}`)}
 		}
@@ -371,7 +374,7 @@ func TestReviewLoop_OtherStepsStaySessionIsolated(t *testing.T) {
 	mock.respond = func(opts agent.RunOpts) *agent.Result {
 		switch opts.Purpose {
 		case "review":
-			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["feature.txt"]}`)}
 		default:
 			return &agent.Result{Output: []byte(`{"findings":[],"summary":"nothing to do"}`)}
 		}

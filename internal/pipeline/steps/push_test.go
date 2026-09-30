@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func setupGateMirror(t *testing.T, sctx *pipeline.StepContext) string {
@@ -195,7 +196,7 @@ func TestAssertReviewApprovedPushHead_UsesStepScopedGit(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "descendant")
 	proposedHead := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	realGit, err := exec.LookPath("git")
+	realGit, err := testgit.RealGit()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +248,7 @@ func TestPushStep_BindsRemoteAndDatabaseToVerifiedCommitWhenHEADMovesDuringPush(
 	replacementHead := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "checkout", "--detach", approvedHead)
 
-	realGit, err := exec.LookPath("git")
+	realGit, err := testgit.RealGit()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +467,7 @@ func TestPushStep_TargetsForkWhenConfigured(t *testing.T) {
 func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	realGit, err := exec.LookPath("git")
+	realGit, err := testgit.RealGit()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -713,6 +714,28 @@ func TestPushStep_AllowsForcePushOnRerunOverPriorRunPushedGeneration(t *testing.
 	remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
 	if remoteHead != rebasedHead {
 		t.Fatalf("expected remote head = %s, got %s", rebasedHead, remoteHead)
+	}
+}
+
+func TestLastKnownBranchTip_PrefersCurrentDurablePublication(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+
+	stale := "1111111111111111111111111111111111111111"
+	durable := "2222222222222222222222222222222222222222"
+	sctx.Run.LastPushedSHA = &stale
+	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+		HeadSHA:           durable,
+		TargetKind:        "upstream",
+		TargetFingerprint: "fingerprint",
+		Ref:               "refs/heads/feature",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := lastKnownBranchTip(sctx.Ctx, sctx, "feature", false); got != durable {
+		t.Fatalf("lastKnownBranchTip = %q, want current durable publication %q instead of stale in-memory %q", got, durable, stale)
 	}
 }
 
