@@ -65,8 +65,15 @@ func TestGuardGeneratedFilesWorkflowUsesGitDiffWithFullHistory(t *testing.T) {
 	if !strings.Contains(content, "fetch-depth: 0") {
 		t.Errorf("workflow must use fetch-depth: 0 so merge-base for base...head is available")
 	}
-	if !strings.Contains(content, `git diff --name-only "${BASE_SHA}...${HEAD_SHA}"`) {
-		t.Errorf("workflow must use 'git diff --name-only base...head' (three-dot) for PR file list")
+	if !strings.Contains(content, `sh scripts/guard-generated-files.sh "${BASE_SHA}" "${HEAD_SHA}" refs/remotes/upstream/main`) {
+		t.Errorf("workflow must run the guard script on the PR's base and head against upstream's main")
+	}
+	script, err := os.ReadFile("scripts/guard-generated-files.sh")
+	if err != nil {
+		t.Fatalf("read guard script: %v", err)
+	}
+	if !strings.Contains(string(script), `git diff --name-only "${base}...${head}"`) {
+		t.Errorf("guard script must use 'git diff --name-only base...head' (three-dot) for PR file list")
 	}
 	if strings.Contains(content, "gh api") {
 		t.Errorf("workflow must not fall back to the GitHub API for file listing")
