@@ -197,10 +197,17 @@ func runAxiAnswer(cmd *cobra.Command, aa answerArgs) error {
 // before that park is published, so the park appears afterwards still carrying
 // the questions this answer closed until the gate's own resumer releases it.
 // Only the daemon can tell that park from a genuine new question, and it says
-// so by releasing it: the gate re-checks its conversation the moment it parks,
-// bounded by gate_reconcile_timeout. So each question park gets grace (that
-// same timeout, read from the owning root's global config) to leave, and one
-// still there after it asked something new and is returned.
+// so by releasing it: a LIVE park re-checks its conversation the moment it
+// registers (waitForApprovalOrReconcile with immediate=true), bounded by
+// gate_reconcile_timeout. So each question park gets grace (that same timeout,
+// read from the owning root's global config) to leave, and one still there
+// after it asked something new and is returned.
+//
+// A park restored by daemon recovery is the accepted exception: it is waited
+// on with immediate=false, so its first resumer check is one
+// gate_reconcile_interval away and the grace can expire before that park is
+// released. An answer racing a daemon restart therefore gets the park it just
+// answered back; reattach with `axi run` rather than answering again.
 func followAnsweredReview(ctx context.Context, progress io.Writer, client *ipc.Client, socketPath, runID string, resumed bool, grace time.Duration) (*ipc.RunInfo, bool, error) {
 	review := string(types.StepReview)
 	if resumed {
@@ -241,9 +248,9 @@ func followAnsweredReview(ctx context.Context, progress io.Writer, client *ipc.C
 // timer fires (deadlinePassedErr), and whenever the remaining --wait is shorter
 // than the grace, context.WithTimeout hands back a timerless cancel-child of
 // that same deadline, so an elapsed --wait arrives here as DeadlineExceeded
-// with a nil Err(). Credited to the grace it returned the park this answer just
-// closed as the run's next gate at exit 0, instead of the elapsed wait
-// isAxiWaitElapsed classifies from the same deadline.
+// with a nil Err(). Credited to the grace, that would return the park this
+// answer just closed as the run's next gate at exit 0, instead of the elapsed
+// wait isAxiWaitElapsed classifies from the same deadline.
 func graceExpired(ctx context.Context, err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) && !deadlinePassed(ctx)
 }
