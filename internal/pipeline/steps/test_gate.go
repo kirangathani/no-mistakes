@@ -16,7 +16,8 @@ import (
 // the live-evidence agent has to run at all for this run.
 //
 // The configured commands.test is NOT part of that decision. It runs on every
-// run, before this gate is consulted, and this gate can never skip it. What
+// run, before this gate is consulted, and this gate can never skip it (only
+// the trusted test.mode weak setting delegates it to CI, in test.go). What
 // the gate bounds is the evidence turn, which a pipeline audit measured at
 // ~21 minutes and ~19M tokens per run - 38% of all pipeline tokens - against a
 // no-go rate of roughly one round in twenty-three, re-bought in full on every
@@ -236,6 +237,7 @@ func gatedTestOutcome(
 	baselineSummary string,
 	baselineExitCode int,
 	fixSummary string,
+	delegatedSuite string,
 ) (*pipeline.StepOutcome, error) {
 	findings := gate.Reused
 	if gate.Source == types.TestEvidenceSourceNoProductChange {
@@ -245,7 +247,7 @@ func gatedTestOutcome(
 	findings.TestedHeadSHA = sctx.Run.HeadSHA
 	findings.EvidenceSource = gate.Source
 	findings.EvidenceReason = gate.Reason
-	findings.TestingSummary = gate.Reason
+	findings.TestingSummary = withDelegatedSuiteNote(delegatedSuite, gate.Reason)
 	findings.Summary = baselineSummary
 	findings.Items = append(append([]Finding(nil), baselineFindings...), verdictFindings(findings)...)
 
