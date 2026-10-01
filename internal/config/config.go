@@ -577,7 +577,11 @@ type Commands struct {
 	Prepare string `yaml:"prepare"`
 	Lint    string `yaml:"lint"`
 	Test    string `yaml:"test"`
-	Format  string `yaml:"format"`
+	// TestRelated is the cheap related-tests command test.mode weak runs in
+	// place of Test. It sees NO_MISTAKES_BASE_SHA and NO_MISTAKES_CHANGED_FILES
+	// (newline-separated) and is ignored in the default full mode.
+	TestRelated string `yaml:"test_related"`
+	Format      string `yaml:"format"`
 }
 
 // AutoFixRaw is the YAML representation of auto-fix config.
@@ -880,7 +884,19 @@ type TestRaw struct {
 	// able to declare their own product code non-product and skip live
 	// validation of it.
 	NonProductPaths []string `yaml:"non_product_paths"`
+	// Mode is TestModeFull (the default, also "") or TestModeWeak. Weak skips
+	// commands.test locally and delegates the full suite to the PR's CI,
+	// running only commands.test_related when set; the live-evidence agent
+	// is unchanged. It decides whether the suite gates the pushed branch at
+	// all, so it is honored ONLY from the trusted default-branch copy.
+	Mode string `yaml:"mode"`
 }
+
+// Test step modes. See TestRaw.Mode.
+const (
+	TestModeFull = "full"
+	TestModeWeak = "weak"
+)
 
 // DefaultNonProductPaths is the built-in answer to "which changed paths cannot
 // carry a live-drivable product change": documentation and markdown, test
@@ -959,6 +975,8 @@ type Test struct {
 	// it set one, DefaultNonProductPaths otherwise. An explicitly empty
 	// configured list resolves to an empty slice, not the defaults.
 	NonProductPaths []string
+	// Mode is "" (full) or TestModeWeak; trusted-only (see TestRaw.Mode).
+	Mode string
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -2511,6 +2529,10 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := validateTestRaw(cfg.Test); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	// Weak delegates the full suite to CI; with no CI nothing would run it.
+	if cfg.NoCI && strings.TrimSpace(cfg.Test.Mode) == TestModeWeak {
+		return nil, errors.New("parse repo config: test.mode weak delegates the test suite to CI and cannot be combined with no_ci")
+	}
 	if err := validateGates(cfg.Gates); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
@@ -2736,6 +2758,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// test.instructions is: a contributor must not be able to declare their
 		// own product code non-product and skip the live validation of it.
 		effective.Test.NonProductPaths = append([]string(nil), trusted.Test.NonProductPaths...)
+		// test.mode weak skips the configured suite, so a pushed branch must
+		// not be able to opt its own validation into it.
+		effective.Test.Mode = trusted.Test.Mode
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -2763,6 +2788,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Prepare = false
 		effective.Test.AllowApproveOverFailure = ""
 		effective.Test.NonProductPaths = nil
+		effective.Test.Mode = ""
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -2996,6 +3022,11 @@ func validateTestRaw(test TestRaw) error {
 	// evidence bill the gate exists to remove. Surface the typo in the config
 	// instead. Like the fields above, this also validates the PUSHED copy even
 	// though only the trusted list is honored.
+	switch strings.TrimSpace(test.Mode) {
+	case "", TestModeFull, TestModeWeak:
+	default:
+		return fmt.Errorf("test.mode must be %q or %q, got %q", TestModeFull, TestModeWeak, test.Mode)
+	}
 	for _, pattern := range test.NonProductPaths {
 		trimmed := strings.TrimSpace(pattern)
 		if trimmed == "" {
@@ -3229,6 +3260,11 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	// (nil) takes the built-in defaults; an explicitly empty one stays empty so
 	// a repository can opt every path back into being product code.
 	test.NonProductPaths = resolveNonProductPaths(repo.Test.NonProductPaths)
+	// Repository-only and already trusted-only, like Instructions. "full" is
+	// the default spelled out, so it resolves to "".
+	if strings.TrimSpace(repo.Test.Mode) == TestModeWeak {
+		test.Mode = TestModeWeak
+	}
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {

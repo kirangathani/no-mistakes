@@ -39,10 +39,20 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 
+	// test.mode weak delegates the full suite to the PR's CI (the CI step's
+	// fix path owns a red suite there) and runs only the cheap related-tests
+	// command locally, if one is configured. The evidence agent is unchanged.
+	testCmd := sctx.Config.Commands.Test
+	delegatedSuite := ""
+	if sctx.Config.Test.Mode == config.TestModeWeak {
+		delegatedSuite = testCmd
+		testCmd = sctx.Config.Commands.TestRelated
+	}
+
 	// Agent-only preparation is an explicit eager opt-in, not a claim from
 	// the agent that dependencies exist. Use the same worktree receipt and
 	// restoration lifecycle as configured commands, before even a repair turn.
-	if sctx.Config.Commands.Test == "" && sctx.Config.Test.Prepare {
+	if testCmd == "" && sctx.Config.Test.Prepare {
 		if err := ensurePrepared(sctx, s.Name()); err != nil {
 			return nil, fmt.Errorf("prepare test dependencies: %w", err)
 		}
@@ -126,7 +136,6 @@ Previous test findings to address:
 		fixSummary = summary
 	}
 
-	testCmd := sctx.Config.Commands.Test
 	tested := []string{}
 	var baselineFindings []Finding
 	var baselineSummary string
@@ -136,7 +145,13 @@ Previous test findings to address:
 			return nil, fmt.Errorf("prepare test dependencies: %w", err)
 		}
 		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
-		output, exitCode, err := runStepShellCommand(sctx, testCmd)
+		env := stepEnvironment(sctx)
+		if sctx.Config.Test.Mode == config.TestModeWeak {
+			if env, err = testRelatedEnvironment(sctx, baseSHA); err != nil {
+				return nil, fmt.Errorf("list changed files for commands.test_related: %w", err)
+			}
+		}
+		output, exitCode, err := runShellCommandWithProcessEnv(sctx.Ctx, sctx.WorkDir, env, testCmd)
 		if err != nil {
 			logConfiguredCommandOutput(sctx, output, types.StepTest)
 			return nil, fmt.Errorf("run test command: %w", err)
@@ -153,6 +168,9 @@ Previous test findings to address:
 			baselineSummary = projectedOutput
 			baselineExitCode = exitCode
 		}
+	}
+	if delegatedSuite != "" {
+		sctx.Log(fmt.Sprintf("test.mode is weak: full test suite not run locally, delegated to CI: %s", delegatedSuite))
 	}
 	if repairCut != nil {
 		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
@@ -171,7 +189,7 @@ Previous test findings to address:
 	gate := resolveTestEvidenceGate(sctx, baseSHA, baselineExitCode != 0)
 	if gate.Source != types.TestEvidenceSourceAgent {
 		sctx.Log("skipping the live-evidence agent: " + gate.Reason)
-		return gatedTestOutcome(sctx, gate, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary)
+		return gatedTestOutcome(sctx, gate, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary, delegatedSuite)
 	}
 	if testCmd == "" {
 		sctx.Log("no test command configured, asking agent to run tests...")
@@ -192,6 +210,9 @@ Previous test findings to address:
 		} else {
 			configuredTestCommand = fmt.Sprintf("\nConfigured test command failed with exit code %d: `%s`\n", baselineExitCode, testCmd)
 		}
+	}
+	if delegatedSuite != "" {
+		configuredTestCommand += fmt.Sprintf("\nThe full test suite `%s` was NOT run locally and must not be run: this repository delegates it to the pull request's CI. Do not claim it passed.\n", delegatedSuite)
 	}
 	trustedRunbook := trustedTestInstructionsSection(sctx) + budgetCutGuidanceSection(sctx)
 	fallbackGuidance := `- Never treat "do not run everything" as permission to run nothing: if no existing check drives a scenario, write or improve a focused test, perform manual verification with evidence, or report a warning finding that sufficient targeted evidence is not possible.
@@ -285,6 +306,7 @@ Rules:
 	findings.TestedHeadSHA = sctx.Run.HeadSHA
 	findings.EvidenceSource = gate.Source
 	findings.EvidenceReason = gate.Reason
+	findings.TestingSummary = withDelegatedSuiteNote(delegatedSuite, findings.TestingSummary)
 	findings.Items = append(baselineFindings, findings.Items...)
 	if baselineSummary != "" {
 		findings.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, findings.Summary}, "\n"))
@@ -843,4 +865,39 @@ func configuredTestCommandOverrideReason(findings types.Findings) string {
 		}
 	}
 	return ""
+}
+
+// testRelatedEnvironment is the step environment plus what
+// commands.test_related needs to pick its tests: the merge-base and the
+// changed (non-deleted) files against it, newline-separated. In fix mode the
+// fixer's edits are not committed yet, so the diff is against the worktree.
+func testRelatedEnvironment(sctx *pipeline.StepContext, baseSHA string) ([]string, error) {
+	args := []string{"diff", "--name-only", "-z", "--no-renames", "--diff-filter=d", baseSHA}
+	if !sctx.Fixing {
+		args[len(args)-1] = baseSHA + ".." + sctx.Run.HeadSHA
+	}
+	out, err := stepGitRunRaw(sctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	extra := append(append([]string(nil), sctx.Env...),
+		"NO_MISTAKES_BASE_SHA="+baseSHA,
+		"NO_MISTAKES_CHANGED_FILES="+strings.Join(changedPathList(out), "\n"),
+	)
+	env := mergeEnv(extra)
+	if sctx.ForgeContext != nil && !sctx.ForgeContext.Environment.Empty() {
+		env = sctx.ForgeContext.Environment.Apply(env)
+	}
+	return env, nil
+}
+
+// withDelegatedSuiteNote states in the Testing summary (and so the PR body)
+// that test.mode weak left the full suite to CI, so nothing reads a green
+// Test step as a local suite pass.
+func withDelegatedSuiteNote(delegatedSuite, summary string) string {
+	if delegatedSuite == "" {
+		return summary
+	}
+	note := fmt.Sprintf("Full test suite (`%s`) not run locally: test.mode is weak, so it is delegated to CI.", delegatedSuite)
+	return strings.TrimSpace(note + " " + summary)
 }
