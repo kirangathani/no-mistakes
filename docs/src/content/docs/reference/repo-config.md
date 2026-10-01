@@ -8,12 +8,12 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.non_product_paths`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.non_product_paths`, `test.mode`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.non_product_paths`, and `test.evidence.branch`.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.instructions`, `test.allow_approve_over_failure`, `test.non_product_paths`, `test.mode`, and `test.evidence.branch`.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -369,6 +369,28 @@ no-mistakes does not guess whether an arbitrary shell string is "too broad" - th
 When set, the test step runs this exact command first as the baseline and checks the exit code.
 Whether the baseline passes, fails, or is absent, the agent then derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
 A non-zero exit parks the Test step. Approving that gate records an explicit override on the step and on the PR attestation; the [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check treats that as non-compliant unless [`test.allow_approve_over_failure`](#testallow_approve_over_failure) is set.
+
+### commands.test_related
+
+Cheap related-tests command that [`test.mode: weak`](#testmode) runs **in place of** `commands.test`. Ignored in the default full mode.
+
+| | |
+| --- | --- |
+| Type | `string` |
+| Default | Empty (weak mode runs no local test command) |
+
+It runs like `commands.test` (same shell, same baseline handling, a non-zero exit parks the Test step the same way) with two extra environment variables so it can select the tests the change touches:
+
+- `NO_MISTAKES_BASE_SHA` - the merge-base the run's diff is measured from.
+- `NO_MISTAKES_CHANGED_FILES` - the changed, non-deleted paths against that base, newline-separated and repository-relative.
+
+```yaml
+test:
+  mode: weak
+commands:
+  test: npm test                    # still what CI runs; not run locally in weak mode
+  test_related: 'npx vitest related --run $NO_MISTAKES_CHANGED_FILES'
+```
 
 ### commands.lint
 
@@ -894,6 +916,19 @@ test:
 Setting the key **replaces** the whole default list rather than adding to it, so a narrowed list must restate the defaults it still wants. An explicitly empty list (`non_product_paths: []`) is the deliberate opt-out: every changed path is product code, so the evidence agent runs on every run. A pattern Git-style globbing would reject fails the config rather than silently matching nothing.
 
 Like `test.instructions`, this field decides how its own gate treats the pushed branch, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`. A contributor's pushed branch cannot declare its own product code non-product and skip the live validation of it.
+
+### test.mode
+
+Whether the Test step runs the full configured suite locally.
+
+| | |
+| --- | --- |
+| Type | `string`: `full` or `weak` |
+| Default | `full` |
+
+`full` is the behavior described under [`commands.test`](#commandstest). `weak` is for a repository whose pull-request CI already runs the full suite: the Test step does **not** run `commands.test` locally, runs [`commands.test_related`](#commandstest_related) instead when one is set, and still runs the live-evidence agent exactly as in full mode. The suite is delegated to CI, where a red test check goes through the CI step's existing fix path. The Testing summary on the step and in the PR body opens with a line naming the suite that was not run locally, and `tested` lists only what actually ran, so nothing reads a green Test step as a local suite pass.
+
+Any other value fails the config. `weak` combined with [`no_ci`](#no_ci) is refused, since nothing would run the suite. This field decides whether the suite gates the pushed branch at all, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
 
 ### test.evidence
 
